@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="logo_synapase.png" alt="SynapseOS Logo" width="250" />
+
 <img src="https://img.shields.io/badge/SynapseOS-v1.0-blueviolet?style=for-the-badge" alt="SynapseOS" />
 
 # SynapseOS
@@ -12,10 +14,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-245%20passing-brightgreen)](orchestrator/tests/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)](docker-compose.yml)
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/ihtesham-jahangir/SynapseOS)
 
 **Run a full AI inference stack — locally, privately, without any cloud API.**
 
-[Quick Start](#quick-start) · [Architecture](#architecture) · [API Reference](#api-reference) · [Configuration](#configuration) · [Monitoring](#monitoring)
+[Quick Start](#quick-start) · [Architecture](#architecture) · [API Reference](#api-reference) · [Configuration](#configuration) · [Monitoring](#monitoring) · [GitHub Repository](https://github.com/ihtesham-jahangir/SynapseOS)
 
 </div>
 
