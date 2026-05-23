@@ -1,0 +1,114 @@
+version: "3.9"
+
+# ── SynapseOS Full Stack ──────────────────────────────────────────────────────
+#
+# Services:
+#   llama-server  – llama.cpp HTTP server
+#   synapseos     – AI Operating System orchestration API
+#   prometheus    – Scrapes /metrics from SynapseOS
+#   grafana       – Dashboard at http://localhost:3000  (admin / admin)
+#
+# Usage:
+#   1. Place your .gguf model in ./models/
+#   2. Copy .env and set API_KEY + optionally API_AUTH_ENABLED=true
+#   3. docker compose up
+#
+# Endpoints:
+#   API      → http://localhost:8000
+#   Docs     → http://localhost:8000/docs
+#   Metrics  → http://localhost:8000/metrics
+#   Grafana  → http://localhost:3000   (admin / admin)
+
+services:
+  # ── llama.cpp server ─────────────────────────────────────────────────────────
+  llama-server:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models:/models:ro
+    environment:
+      # Override model via env; script picks up LLAMA_MODEL_PATH automatically
+      LLAMA_MODEL_PATH: /models/Llama-3.2-3B-Instruct-Q5_K_M.gguf
+    command: >
+      --model /models/Llama-3.2-3B-Instruct-Q5_K_M.gguf
+      --host 0.0.0.0
+      --port 8080
+      --ctx-size 4096
+      --threads 4
+      --n-gpu-layers 0
+      --chat-template chatml
+      --log-disable
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── SynapseOS orchestration API ──────────────────────────────────────────────
+  synapseos:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - synapseos-data:/app/data
+      - ./models:/app/models:ro
+    env_file: .env
+    environment:
+      LLAMA_SERVER_URL: http://llama-server:8080
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      SQLITE_PATH: /app/data/synapseos.db
+      FAISS_INDEX_PATH: /app/data/faiss_index
+    depends_on:
+      llama-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    depends_on:
+      synapseos:
+        condition: service_healthy
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.3
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/synapseos.json
+    depends_on:
+      - prometheus
+
+volumes:
+  synapseos-data:
+  prometheus-data:
+  grafana-data:

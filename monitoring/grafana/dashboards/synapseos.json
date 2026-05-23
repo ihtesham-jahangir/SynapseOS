@@ -1,0 +1,265 @@
+{
+  "title": "SynapseOS",
+  "uid": "synapseos-main",
+  "version": 1,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "tags": ["synapseos", "llm"],
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2 } }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(synapseos_requests_total[1m])) by (intent)",
+          "legendFormat": "{{ intent }}",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "color": { "fixedColor": "red", "mode": "fixed" }, "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(synapseos_requests_total{status=\"error\"}[1m]))",
+          "legendFormat": "errors/s",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 3,
+      "title": "Active Sessions",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 3 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 10 },
+            { "color": "red", "value": 50 }
+          ]}
+        }
+      },
+      "targets": [
+        { "expr": "synapseos_active_sessions", "legendFormat": "sessions", "refId": "A" }
+      ]
+    },
+
+    {
+      "id": 4,
+      "title": "Total Requests (1 h)",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 3 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "sum(increase(synapseos_requests_total[1h]))", "legendFormat": "total", "refId": "A" }
+      ]
+    },
+
+    {
+      "id": 5,
+      "title": "Cache Hit Rate (1 h)",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 3, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit",
+          "thresholds": { "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 0.1 },
+            { "color": "green", "value": 0.3 }
+          ]}
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(synapseos_requests_total{status=\"cache_hit\"}[1h])) / sum(increase(synapseos_requests_total[1h]))",
+          "legendFormat": "hit rate",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 6,
+      "title": "llama.cpp Errors",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 3, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]}
+        }
+      },
+      "targets": [
+        { "expr": "sum(increase(synapseos_llama_errors_total[1h]))", "legendFormat": "errors", "refId": "A" }
+      ]
+    },
+
+    {
+      "id": 7,
+      "title": "Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 7, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(synapseos_request_latency_seconds_bucket[2m])) by (le))",
+          "legendFormat": "p50", "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(synapseos_request_latency_seconds_bucket[2m])) by (le))",
+          "legendFormat": "p95", "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(synapseos_request_latency_seconds_bucket[2m])) by (le))",
+          "legendFormat": "p99", "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 8,
+      "title": "Time to First Token (TTFT)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 7, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(synapseos_time_to_first_token_seconds_bucket[2m])) by (le))",
+          "legendFormat": "TTFT p50", "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(synapseos_time_to_first_token_seconds_bucket[2m])) by (le))",
+          "legendFormat": "TTFT p95", "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 9,
+      "title": "Token Throughput (tokens/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 14, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2 } } },
+      "targets": [
+        {
+          "expr": "synapseos_tokens_per_second",
+          "legendFormat": "tokens/s", "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 10,
+      "title": "Memory Cache Hits by Tier",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 14, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(synapseos_memory_cache_hits_total[1m])) by (level)",
+          "legendFormat": "{{ level }}", "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 11,
+      "title": "RAG Chunks Retrieved",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 14, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2 } } },
+      "targets": [
+        {
+          "expr": "rate(synapseos_rag_chunks_retrieved_total[1m])",
+          "legendFormat": "chunks/s", "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 12,
+      "title": "Intent Distribution (1 h)",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 21, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": { "pieType": "donut", "legend": { "displayMode": "table", "placement": "right" } },
+      "targets": [
+        {
+          "expr": "sum(increase(synapseos_requests_total{status=\"success\"}[1h])) by (intent)",
+          "legendFormat": "{{ intent }}", "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 13,
+      "title": "Latency by Intent (p95)",
+      "type": "bargauge",
+      "gridPos": { "x": 8, "y": 21, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
+      "options": { "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(synapseos_request_latency_seconds_bucket[5m])) by (intent, le))",
+          "legendFormat": "{{ intent }}", "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 14,
+      "title": "Fusion Context Items",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 21, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2 } } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(synapseos_fusion_context_items_bucket[2m])) by (le))",
+          "legendFormat": "median items", "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(synapseos_fusion_context_items_bucket[2m])) by (le))",
+          "legendFormat": "p95 items", "refId": "B"
+        }
+      ]
+    }
+
+  ]
+}
