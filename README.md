@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="logo_synapase.png" alt="SynapseOS Logo" width="250" />
+<img src="logo_synpase-Photoroom.png" alt="SynapseOS Logo" width="280" />
 
 <img src="https://img.shields.io/badge/SynapseOS-v1.0-blueviolet?style=for-the-badge" alt="SynapseOS" />
 
