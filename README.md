@@ -1,8 +1,15 @@
 <div align="center">
 
-<img src="logo_synpase-Photoroom.png" alt="SynapseOS Logo" width="280" />
-
-<img src="https://img.shields.io/badge/SynapseOS-v1.0-blueviolet?style=for-the-badge" alt="SynapseOS" />
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="logo_synpase-Photoroom.png" alt="SynapseOS Logo" width="280" />
+    </td>
+    <td align="center" width="50%">
+      <img src="https://img.shields.io/badge/SynapseOS-v1.0-blueviolet?style=for-the-badge" alt="SynapseOS" />
+    </td>
+  </tr>
+</table>
 
 # SynapseOS
 
