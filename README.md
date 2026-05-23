@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="logo_synpase-Photoroom.png" alt="SynapseOS Logo" width="280" />
+<img src="logo_main.png" alt="SynapseOS Logo" width="280" />
 
 # SynapseOS
 
