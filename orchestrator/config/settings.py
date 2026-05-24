@@ -36,6 +36,8 @@ class LlamaSettings(BaseSettings):
     timeout: int = 120
     draft_model_url: Optional[str] = None  # set to enable speculative decoding
     draft_k_tokens: int = 5
+    n_parallel: int = 1          # env: LLAMA_N_PARALLEL (match --parallel N in start_llama.sh)
+    batch_timeout_ms: float = 0.0  # env: LLAMA_BATCH_TIMEOUT_MS (>0 enables time-window batching)
 
 
 class EmbeddingSettings(BaseSettings):
@@ -65,6 +67,9 @@ class MemorySettings(BaseSettings):
 
     # L4 – persistent knowledge
     l4_max_results: int = Field(default=5, alias="L4_MAX_RESULTS")
+
+    # Async compression queue (v2.1)
+    compression_queue_maxsize: int = Field(default=32, alias="COMPRESSION_QUEUE_MAXSIZE")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 
@@ -142,6 +147,15 @@ class APISettings(BaseSettings):
     rate_limit_window: int = 60
 
 
+class MultiAgentSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
+
+    enabled: bool = True            # AGENT_ENABLED — set False to skip decomposition
+    max_subtasks: int = 5           # AGENT_MAX_SUBTASKS
+    max_parallel: int = 4           # AGENT_MAX_PARALLEL (concurrent agents per wave)
+    task_timeout_s: float = 180.0   # AGENT_TASK_TIMEOUT_S (per sub-task timeout)
+
+
 class StorageSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -168,6 +182,7 @@ class Settings(BaseSettings):
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     api: APISettings = Field(default_factory=APISettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    agent: MultiAgentSettings = Field(default_factory=MultiAgentSettings)
 
     debug: bool = False
     mock_llm: bool = False

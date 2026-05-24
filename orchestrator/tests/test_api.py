@@ -242,7 +242,7 @@ class TestChatEndpoint:
         }
 
     def test_chat_returns_200(self, client):
-        from orchestrator.api.dependencies import get_inference_engine
+        from orchestrator.api.dependencies import get_multi_agent_engine
         from orchestrator.core.types import ChatResponse
 
         mock_engine = MagicMock()
@@ -261,7 +261,7 @@ class TestChatEndpoint:
             )
         )
 
-        client.app.dependency_overrides[get_inference_engine] = lambda: mock_engine
+        client.app.dependency_overrides[get_multi_agent_engine] = lambda: mock_engine
         try:
             resp = client.post("/v1/chat", json=self._chat_payload("Hello"))
             assert resp.status_code == 200
@@ -269,28 +269,28 @@ class TestChatEndpoint:
             assert data["content"] == "Mock response"
             assert data["session_id"] == "api-test"
         finally:
-            client.app.dependency_overrides.pop(get_inference_engine, None)
+            client.app.dependency_overrides.pop(get_multi_agent_engine, None)
 
     def test_chat_missing_messages_returns_422(self, client):
         resp = client.post("/v1/chat", json={"session_id": "s1"})
         assert resp.status_code == 422
 
     def test_chat_timeout_returns_504(self, client):
-        from orchestrator.api.dependencies import get_inference_engine
+        from orchestrator.api.dependencies import get_multi_agent_engine
         from orchestrator.core.exceptions import LlamaTimeoutError
 
         mock_engine = MagicMock()
         mock_engine.process_request = AsyncMock(side_effect=LlamaTimeoutError())
 
-        client.app.dependency_overrides[get_inference_engine] = lambda: mock_engine
+        client.app.dependency_overrides[get_multi_agent_engine] = lambda: mock_engine
         try:
             resp = client.post("/v1/chat", json=self._chat_payload("hi"))
             assert resp.status_code == 504
         finally:
-            client.app.dependency_overrides.pop(get_inference_engine, None)
+            client.app.dependency_overrides.pop(get_multi_agent_engine, None)
 
     def test_chat_llama_error_returns_502(self, client):
-        from orchestrator.api.dependencies import get_inference_engine
+        from orchestrator.api.dependencies import get_multi_agent_engine
         from orchestrator.core.exceptions import LlamaServerError
 
         mock_engine = MagicMock()
@@ -298,15 +298,15 @@ class TestChatEndpoint:
             side_effect=LlamaServerError("backend down")
         )
 
-        client.app.dependency_overrides[get_inference_engine] = lambda: mock_engine
+        client.app.dependency_overrides[get_multi_agent_engine] = lambda: mock_engine
         try:
             resp = client.post("/v1/chat", json=self._chat_payload("hi"))
             assert resp.status_code == 502
         finally:
-            client.app.dependency_overrides.pop(get_inference_engine, None)
+            client.app.dependency_overrides.pop(get_multi_agent_engine, None)
 
     def test_chat_orchestrator_error_returns_500(self, client):
-        from orchestrator.api.dependencies import get_inference_engine
+        from orchestrator.api.dependencies import get_multi_agent_engine
         from orchestrator.core.exceptions import OrchestratorError
 
         mock_engine = MagicMock()
@@ -314,12 +314,12 @@ class TestChatEndpoint:
             side_effect=OrchestratorError("internal problem")
         )
 
-        client.app.dependency_overrides[get_inference_engine] = lambda: mock_engine
+        client.app.dependency_overrides[get_multi_agent_engine] = lambda: mock_engine
         try:
             resp = client.post("/v1/chat", json=self._chat_payload("hi"))
             assert resp.status_code == 500
         finally:
-            client.app.dependency_overrides.pop(get_inference_engine, None)
+            client.app.dependency_overrides.pop(get_multi_agent_engine, None)
 
 
 # ── Exception hierarchy ───────────────────────────────────────────────────────

@@ -22,6 +22,11 @@ from orchestrator.utils.logging_utils import get_logger
 
 log = get_logger(__name__)
 
+_WAL_PRAGMAS = [
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA synchronous=NORMAL",
+]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS knowledge_base (
     id              TEXT PRIMARY KEY,
@@ -58,8 +63,11 @@ class L4KnowledgeBase(BaseMemoryStore):
             return
         async with aiosqlite.connect(self._db_path) as db:
             await db.executescript(_SCHEMA)
+            for pragma in _WAL_PRAGMAS:
+                await db.execute(pragma)
             await db.commit()
         self._initialized = True
+        log.debug("L4 SQLite initialised", db=self._db_path, wal=True)
 
     async def store(self, item: MemoryItem) -> None:
         await self._init()

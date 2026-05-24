@@ -22,6 +22,7 @@ from orchestrator.api.routes import (
     documents_router,
     health_router,
     admin_router,
+    agents_router,
 )
 from orchestrator.api.middleware import APIKeyMiddleware, RequestLoggingMiddleware, RateLimitMiddleware
 from orchestrator.api.dependencies import Container
@@ -57,22 +58,57 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     except Exception as exc:
         log.warning("Embedding warmup failed (will retry on first request)", error=str(exc))
 
-    # Verify llama.cpp connectivity (non-blocking warning)
+    # Verify llama.cpp verifier connectivity (non-blocking warning)
     llama_ok = await container.llama_client.health_check()
     if llama_ok:
-        log.info("llama.cpp server is reachable")
+        log.info("llama.cpp verifier server is reachable")
     else:
         log.warning(
-            "llama.cpp server is not reachable",
+            "llama.cpp verifier server is not reachable",
             url=cfg.llama.server_url,
-            hint="Start the server with: llama-server -m <model.gguf> --host 0.0.0.0 --port 8080",
+            hint="Start the verifier with: ./start_llama.sh",
         )
 
-    log.info("SynapseOS ready to serve")
+    # Verify draft model server connectivity (optional — only when configured)
+    if container.speculative_decoder is not None and container.speculative_decoder.enabled:
+        draft_ok = await container.draft_client.health_check()
+        if draft_ok:
+            log.info(
+                "Speculative decoding ACTIVE",
+                draft_url=cfg.llama.draft_model_url,
+                k_tokens=cfg.llama.draft_k_tokens,
+            )
+        else:
+            log.warning(
+                "Draft model server not reachable — speculative decoding will fall back to verifier",
+                draft_url=cfg.llama.draft_model_url,
+                hint="Start the draft server with: ./start_draft.sh",
+            )
+    else:
+        log.info(
+            "Speculative decoding disabled",
+            hint="Set LLAMA_DRAFT_MODEL_URL=http://localhost:8081 in .env and run ./start_draft.sh",
+        )
+
+    # Start async compression worker (v2.1)
+    await container.compression_queue.start()
+    log.info(
+        "Compression queue worker started",
+        maxsize=cfg.memory.compression_queue_maxsize,
+    )
+
+    log.info(
+        "SynapseOS v3.0 ready to serve",
+        n_parallel=cfg.llama.n_parallel,
+        batch_timeout_ms=cfg.llama.batch_timeout_ms,
+        agent_max_parallel=cfg.agent.max_parallel,
+        agent_max_subtasks=cfg.agent.max_subtasks,
+    )
     yield
 
-    # Shutdown
+    # Shutdown — drain compression queue before closing connections
     log.info("SynapseOS shutting down...")
+    await container.compression_queue.stop()
     await container.llama_client.close()
     log.info("Shutdown complete")
 
@@ -85,9 +121,9 @@ def create_app() -> FastAPI:
         description=(
             "An AI Operating System for orchestrating intelligent multi-model systems. "
             "Features multi-tier memory (L1-L4), RAG retrieval, expert routing, "
-            "and adaptive context fusion."
+            "adaptive context fusion, and speculative decoding (v2.0)."
         ),
-        version="1.0.0",
+        version="3.0.0",
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
@@ -115,6 +151,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(documents_router)
     app.include_router(admin_router)
+    app.include_router(agents_router)
 
     @app.get("/")
     async def root():

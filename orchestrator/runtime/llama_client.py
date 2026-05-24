@@ -15,15 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    before_sleep_log,
 )
 
 from orchestrator.core.exceptions import LlamaServerError, LlamaTimeoutError
@@ -32,7 +33,73 @@ from orchestrator.utils.logging_utils import get_logger
 
 log = get_logger(__name__)
 
-_RETRY_EXCEPTIONS = (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadTimeout)
+_RETRY_NETWORK_EXCEPTIONS = (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadTimeout)
+_RETRY_STATUS_CODES = frozenset({429, 503})  # rate-limited or server busy
+
+# ChatML / model-specific end-of-turn tokens that leak into content when not
+# listed in the server's stop list.  Strip them as a safety net.
+_EOS_TOKENS: frozenset[str] = frozenset({
+    "<|im_end|>",    # ChatML (Qwen, Mistral-ChatML, many others)
+    "<|im_start|>",  # ChatML start (shouldn't appear in output but guard anyway)
+    "<|eot_id|>",    # Llama-3 end-of-turn
+    "<|end|>",       # Phi-3
+    "</s>",          # SentencePiece EOS
+})
+_DEFAULT_STOP = list(_EOS_TOKENS)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Tenacity predicate: retry on transient network errors and server-busy responses."""
+    if isinstance(exc, _RETRY_NETWORK_EXCEPTIONS):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRY_STATUS_CODES
+    return False
+
+
+# ── Circuit breaker ───────────────────────────────────────────────────────────
+
+class CircuitBreaker:
+    """
+    Three-state circuit breaker: CLOSED → OPEN (after N failures) → HALF_OPEN.
+
+    CLOSED:    normal operation
+    OPEN:      fail fast; no requests sent to backend
+    HALF_OPEN: one trial request allowed; success → CLOSED, failure → OPEN again
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout_s: float = 30.0) -> None:
+        self._threshold = failure_threshold
+        self._recovery = recovery_timeout_s
+        self._failures = 0
+        self._opened_at: Optional[float] = None
+
+    @property
+    def state(self) -> str:
+        if self._opened_at is None:
+            return "closed"
+        if time.monotonic() - self._opened_at >= self._recovery:
+            return "half_open"
+        return "open"
+
+    def is_open(self) -> bool:
+        return self.state == "open"
+
+    def record_success(self) -> None:
+        if self._opened_at is not None:
+            log.info("Circuit breaker CLOSED — backend recovered")
+        self._failures = 0
+        self._opened_at = None
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self._threshold and self._opened_at is None:
+            self._opened_at = time.monotonic()
+            log.warning(
+                "Circuit breaker OPEN — failing fast",
+                failures=self._failures,
+                recovery_s=self._recovery,
+            )
 
 
 class LlamaClient:
@@ -56,6 +123,7 @@ class LlamaClient:
         self._timeout = timeout or llama_cfg.timeout
         self._mock = getattr(cfg, "mock_llm", False)
         self._client: Optional[httpx.AsyncClient] = None
+        self._circuit = CircuitBreaker()
 
     def _mock_response(self, messages: List[Dict[str, str]]) -> str:
         last_content = next(
@@ -82,11 +150,24 @@ class LlamaClient:
     # ── OpenAI-compatible chat ────────────────────────────────────────────────
 
     @retry(
-        retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
+        retry=retry_if_exception(_is_retryable),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
         reraise=True,
     )
+    async def _post_chat(self, client: httpx.AsyncClient, payload: Dict) -> str:
+        """Inner call that lets tenacity see raw httpx exceptions for 429/503 retry."""
+        resp = await client.post("/v1/chat/completions", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        try:
+            content: str = data["choices"][0]["message"]["content"]
+            for tok in _EOS_TOKENS:
+                content = content.replace(tok, "")
+            return content.rstrip()
+        except (KeyError, IndexError) as exc:
+            raise LlamaServerError(f"Unexpected response format: {data}") from exc
+
     async def chat(
         self,
         messages: List[Dict[str, str]],
@@ -96,10 +177,16 @@ class LlamaClient:
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         stop: Optional[List[str]] = None,
+        cache_prompt: bool = True,
     ) -> str:
         if self._mock:
             return self._mock_response(messages)
-        payload = {
+
+        if self._circuit.is_open():
+            raise LlamaServerError("Circuit breaker OPEN — llama.cpp is unreachable")
+
+        effective_stop = list(dict.fromkeys(_DEFAULT_STOP + (stop or [])))
+        payload: Dict[str, Any] = {
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -107,26 +194,23 @@ class LlamaClient:
             "top_k": top_k,
             "repeat_penalty": repeat_penalty,
             "stream": False,
+            "cache_prompt": cache_prompt,
+            "stop": effective_stop,
         }
-        if stop:
-            payload["stop"] = stop
 
         client = await self._get_client()
         try:
-            resp = await client.post("/v1/chat/completions", json=payload)
-            resp.raise_for_status()
+            result = await self._post_chat(client, payload)
+            self._circuit.record_success()
+            return result
         except httpx.TimeoutException as exc:
+            self._circuit.record_failure()
             raise LlamaTimeoutError() from exc
         except httpx.HTTPStatusError as exc:
+            self._circuit.record_failure()
             raise LlamaServerError(
                 f"llama.cpp returned {exc.response.status_code}: {exc.response.text[:200]}"
             ) from exc
-
-        data = resp.json()
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
-            raise LlamaServerError(f"Unexpected response format: {data}") from exc
 
     async def stream_chat(
         self,
@@ -137,6 +221,7 @@ class LlamaClient:
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         stop: Optional[List[str]] = None,
+        cache_prompt: bool = True,
     ) -> AsyncGenerator[str, None]:
         """
         Stream tokens from /v1/chat/completions via Server-Sent Events.
@@ -156,9 +241,9 @@ class LlamaClient:
             "top_k": top_k,
             "repeat_penalty": repeat_penalty,
             "stream": True,
+            "cache_prompt": cache_prompt,
+            "stop": list(dict.fromkeys(_DEFAULT_STOP + (stop or []))),
         }
-        if stop:
-            payload["stop"] = stop
 
         client = await self._get_client()
         try:
@@ -173,7 +258,7 @@ class LlamaClient:
                         chunk = json.loads(line)
                         delta = chunk["choices"][0].get("delta", {})
                         token = delta.get("content", "")
-                        if token:
+                        if token and token not in _EOS_TOKENS:
                             yield token
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue

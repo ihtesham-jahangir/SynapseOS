@@ -80,12 +80,68 @@ async def health_check(
         )
     )
 
+    # Check draft model server (optional — only present when speculative decoding is enabled)
+    if container.speculative_decoder is not None and container.speculative_decoder.enabled:
+        t0 = time.perf_counter()
+        draft_ok = await container.draft_client.health_check()
+        components.append(
+            ComponentHealth(
+                name="draft_server",
+                healthy=draft_ok,
+                latency_ms=(time.perf_counter() - t0) * 1000,
+                details=(
+                    {"url": container.draft_client._base_url, "mode": "speculative_decoding"}
+                    if draft_ok
+                    else {"error": "unreachable", "hint": "run ./start_draft.sh"}
+                ),
+            )
+        )
+
     # Check active WebSocket sessions
     components.append(
         ComponentHealth(
             name="websocket_manager",
             healthy=True,
             details={"active_sessions": ws_mgr.active_session_count()},
+        )
+    )
+
+    # Check compression queue worker (v2.1)
+    cq = container.compression_queue
+    cq_worker_alive = (
+        cq._worker_task is not None and not cq._worker_task.done()
+    ) if cq._started else True  # not started yet → not unhealthy
+    components.append(
+        ComponentHealth(
+            name="compression_queue",
+            healthy=cq_worker_alive,
+            details={
+                "started": cq._started,
+                "queue_depth": cq.queue_depth,
+                "worker_alive": cq_worker_alive,
+            },
+        )
+    )
+
+    # Check agent pool (v3.0)
+    components.append(
+        ComponentHealth(
+            name="agent_pool",
+            healthy=True,
+            details={
+                "active_agents": container.agent_pool.active_count,
+                "bus_topics": container.bus.topic_count,
+            },
+        )
+    )
+
+    # Check llama.cpp circuit breaker state
+    cb_state = container.llama_client._circuit.state
+    components.append(
+        ComponentHealth(
+            name="circuit_breaker",
+            healthy=cb_state != "open",
+            details={"state": cb_state},
         )
     )
 
@@ -136,10 +192,29 @@ async def runtime_stats(
 ) -> dict:
     """Human-readable runtime statistics."""
     container = get_container()
+    spec = container.speculative_decoder
     return {
+        "version": "3.0.0",
         "uptime_seconds": time.time() - _START_TIME,
         "rag_index_size": rag.index_size,
         "active_ws_sessions": ws_mgr.active_session_count(),
         "l1_active_sessions": len(container.l1.active_sessions()),
         "kv_cache_stats": container.kv_cache.get_stats(),
+        "speculative_decoding": {
+            "enabled": spec is not None and spec.enabled,
+            "k_tokens": spec._k if spec is not None else None,
+        },
+        "inference_batcher": {
+            "n_parallel": container.batcher.n_parallel,
+            "in_flight": container.batcher.in_flight,
+            "queue_depth": container.batcher.queue_depth,
+        },
+        "compression_queue": {
+            "queue_depth": container.compression_queue.queue_depth,
+        },
+        "multi_agent": {
+            "enabled": True,
+            "active_agents": container.agent_pool.active_count,
+            "bus_topics": container.bus.topic_count,
+        },
     }

@@ -25,11 +25,12 @@ from orchestrator.core.types import (
 )
 from orchestrator.core.exceptions import LlamaServerError, LlamaTimeoutError, OrchestratorError
 from orchestrator.runtime.inference_engine import InferenceEngine
+from orchestrator.agents.multi_agent_engine import MultiAgentEngine
 from orchestrator.streaming.token_streamer import TokenStreamer
 from orchestrator.streaming.websocket_manager import WebSocketManager
 from orchestrator.utils.logging_utils import get_logger, bind_request_context
 
-from orchestrator.api.dependencies import get_inference_engine, get_ws_manager
+from orchestrator.api.dependencies import get_inference_engine, get_multi_agent_engine, get_ws_manager
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/v1", tags=["chat"])
@@ -38,11 +39,12 @@ router = APIRouter(prefix="/v1", tags=["chat"])
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     request: ChatRequest,
-    engine: InferenceEngine = Depends(get_inference_engine),
+    engine: MultiAgentEngine = Depends(get_multi_agent_engine),
 ) -> ChatResponse:
     """
     Full-response chat endpoint.
-    Runs the full orchestration pipeline and returns when generation is finished.
+    Complex queries are automatically decomposed and executed via the multi-agent
+    system; simple queries are forwarded directly to InferenceEngine.
     """
     try:
         return await engine.process_request(request)
@@ -72,66 +74,15 @@ async def chat_stream_endpoint(
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
-            # Run the orchestration pipeline up to and including fusion
-            intent = await engine._classifier.classify(query)
-            decision = engine._router.route(intent)
-            stored_conv = await engine._memory.get_conversation(session_id)
-
-            # Merge in-request history then append current user message
-            request_history = [m for m in request.messages[:-1]]
-            if request_history:
-                seen = {m.content for m in stored_conv}
-                for m in request_history:
-                    if m.content not in seen:
-                        stored_conv.append(m)
-            from orchestrator.core.types import MessageRole
-            stored_conv.append(Message(role=MessageRole.USER, content=query))
-            conversation = stored_conv
-
-            from orchestrator.utils.async_utils import gather_with_fallback
-            from orchestrator.runtime.inference_engine import _empty_rag_result, _empty_memory_result
-            from orchestrator.runtime.inference_engine import _empty_rag
-
-            memory_context = f"{query}\n" + " ".join(m.content for m in conversation[-5:-1])
-            memory_result, rag_result, expert_guidance = await gather_with_fallback(
-                engine._memory.retrieve_all(memory_context, session_id),
-                engine._rag.retrieve(query) if decision.run_rag else _empty_rag(),
-                engine._experts.get_guidance(query, intent, decision.active_experts),
-                fallbacks=[_empty_memory_result(), _empty_rag_result(), None],
-            )
-
-            from orchestrator.core.types import MemoryResult
-            if not isinstance(memory_result, MemoryResult):
-                memory_result = _empty_memory_result()
-
-            fused = await engine._fusion.fuse(
-                query=query,
-                intent=intent,
-                memory_result=memory_result,
-                rag_result=rag_result,
-                expert_guidance=expert_guidance,
-                conversation=conversation,
-                system_prompt=decision.system_prompt_hint,
-            )
-
-            gen_params = engine._compute.optimize(
-                intent=intent,
-                fused_context=fused,
-                base_params=decision.generation_override,
-            )
-
-            # Stream tokens
+            plan = await engine.build_generation_plan(request)
             streamer = TokenStreamer(session_id=session_id)
             full_content = []
 
-            async for event in streamer.stream(engine.stream(fused, gen_params)):
-                payload = json.dumps(event.model_dump())
-                yield f"data: {payload}\n\n"
-
+            async for event in streamer.stream(engine.stream(plan.fused, plan.params)):
+                yield f"data: {json.dumps(event.model_dump())}\n\n"
                 if event.event_type == StreamEventType.TOKEN:
                     full_content.append(event.content)
 
-            # Background memory update
             user_msg = Message(role=MessageRole.USER, content=query)
             asst_msg = Message(role=MessageRole.ASSISTANT, content="".join(full_content))
             asyncio.create_task(engine._memory.record_turn(session_id, user_msg, asst_msg))
@@ -180,10 +131,16 @@ async def websocket_endpoint(
                 await ws_manager.send_error(session_id, "Invalid JSON")
                 continue
 
+            def _safe_role(raw: str) -> MessageRole:
+                try:
+                    return MessageRole(raw)
+                except ValueError:
+                    return MessageRole.USER
+
             request = ChatRequest(
                 session_id=session_id,
                 messages=[
-                    Message(role=MessageRole(m["role"]), content=m["content"])
+                    Message(role=_safe_role(m.get("role", "user")), content=m.get("content", ""))
                     for m in data.get("messages", [])
                 ],
                 stream=True,
@@ -193,54 +150,11 @@ async def websocket_endpoint(
             if not query:
                 continue
 
-            intent = await engine._classifier.classify(query)
-            decision = engine._router.route(intent)
-            conversation = await engine._memory.get_conversation(session_id)
-
-            from orchestrator.core.types import MemoryResult
-            from orchestrator.runtime.inference_engine import _empty_rag_result
-
-            memory_result = MemoryResult(items=[], total_tokens=0, levels_queried=[], query_time_ms=0)
-            try:
-                memory_result = await engine._memory.retrieve_all(query, session_id)
-            except Exception:
-                pass
-
-            rag_result = _empty_rag_result()
-            if decision.run_rag:
-                try:
-                    rag_result = await engine._rag.retrieve(query)
-                except Exception:
-                    pass
-
-            expert_guidance = None
-            try:
-                expert_guidance = await engine._experts.get_guidance(
-                    query, intent, decision.active_experts
-                )
-            except Exception:
-                pass
-
-            fused = await engine._fusion.fuse(
-                query=query,
-                intent=intent,
-                memory_result=memory_result,
-                rag_result=rag_result,
-                expert_guidance=expert_guidance,
-                conversation=conversation,
-                system_prompt=decision.system_prompt_hint,
-            )
-
-            gen_params = engine._compute.optimize(
-                intent=intent,
-                fused_context=fused,
-                base_params=decision.generation_override,
-            )
-
+            plan = await engine.build_generation_plan(request)
             full_content: list = []
             streamer = TokenStreamer(session_id=session_id)
 
-            async for event in streamer.stream(engine.stream(fused, gen_params)):
+            async for event in streamer.stream(engine.stream(plan.fused, plan.params)):
                 await ws_manager.send_event(session_id, event)
                 if event.event_type == StreamEventType.TOKEN:
                     full_content.append(event.content)

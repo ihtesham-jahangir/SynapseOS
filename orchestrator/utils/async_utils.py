@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Coroutine, List, Optional, Tuple, TypeVar
+from typing import Any, Awaitable, Callable, List, Optional, TypeVar
+
+from orchestrator.utils.logging_utils import get_logger
+
+log = get_logger(__name__)
 
 T = TypeVar("T")
 
@@ -24,28 +28,34 @@ async def gather_with_fallback(
     fallbacks: Optional[List[Any]] = None,
 ) -> List[Any]:
     """
-    Run coroutines concurrently. On individual failure, substitute the
-    corresponding fallback value rather than propagating the exception.
+    Run coroutines concurrently. On individual failure, log a warning and
+    substitute the corresponding fallback value rather than propagating.
     """
     if fallbacks is None:
         fallbacks = [None] * len(coros)
 
-    async def safe(coro: Awaitable[Any], fallback: Any) -> Any:
+    async def safe(coro: Awaitable[Any], fallback: Any, idx: int) -> Any:
         try:
             return await coro
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "gather_with_fallback: subsystem failed, using fallback",
+                index=idx,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             return fallback
 
     return list(
         await asyncio.gather(
-            *(safe(c, f) for c, f in zip(coros, fallbacks))
+            *(safe(c, f, i) for i, (c, f) in enumerate(zip(coros, fallbacks)))
         )
     )
 
 
 async def run_in_executor(func: Callable[..., T], *args: Any) -> T:
     """Run a synchronous blocking function in the default thread-pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, func, *args)
 
 

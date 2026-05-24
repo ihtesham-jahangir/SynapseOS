@@ -27,9 +27,16 @@ from orchestrator.runtime.llama_client import LlamaClient
 from orchestrator.runtime.inference_engine import InferenceEngine
 from orchestrator.runtime.adaptive_compute import AdaptiveComputeController
 from orchestrator.runtime.speculative import SpeculativeDecoder
+from orchestrator.runtime.request_batcher import InferenceBatcher
+from orchestrator.memory.compression_queue import CompressionQueue
 from orchestrator.streaming.websocket_manager import WebSocketManager
 from orchestrator.cache.kv_manager import KVCacheManager
 from orchestrator.cache.response_cache import ResponseCache
+from orchestrator.agents.memory_bus import SharedMemoryBus
+from orchestrator.agents.task_planner import TaskPlanner
+from orchestrator.agents.agent_pool import AgentPool
+from orchestrator.agents.multi_agent_engine import MultiAgentEngine
+from orchestrator.agents.task_store import TaskStore
 
 
 class Container:
@@ -123,6 +130,13 @@ class Container:
         # ── Compressor (needs llama client) ───────────────────────────────
         self.compressor = ContextCompressor(llama_client=self.llama_client)
 
+        # ── Async compression queue (v2.1) ─────────────────────────────────
+        self.compression_queue = CompressionQueue(
+            compressor=self.compressor,
+            l2=self.l2,
+            maxsize=cfg.memory.compression_queue_maxsize,
+        )
+
         # ── Memory manager ─────────────────────────────────────────────────
         self.memory_manager = MemoryManager(
             l1=self.l1,
@@ -130,6 +144,7 @@ class Container:
             l3=self.l3,
             l4=self.l4,
             compressor=self.compressor,
+            compression_queue=self.compression_queue,
         )
 
         # ── Router ─────────────────────────────────────────────────────────
@@ -147,6 +162,12 @@ class Container:
 
         # ── Response cache ─────────────────────────────────────────────────
         self.response_cache = ResponseCache(maxsize=512, ttl_seconds=3600)
+
+        # ── Inference batcher (v2.1) — controls llama.cpp slot concurrency ──
+        self.batcher = InferenceBatcher(
+            n_parallel=cfg.llama.n_parallel,
+            batch_timeout_ms=cfg.llama.batch_timeout_ms,
+        )
 
         # ── Speculative decoder (optional — needs draft_model_url in .env) ─
         if cfg.llama.draft_model_url:
@@ -174,6 +195,7 @@ class Container:
             compute_controller=self.compute_controller,
             response_cache=self.response_cache,
             speculative_decoder=self.speculative_decoder,
+            batcher=self.batcher,
         )
 
         # ── Streaming ──────────────────────────────────────────────────────
@@ -181,6 +203,28 @@ class Container:
 
         # ── KV cache ───────────────────────────────────────────────────────
         self.kv_cache = KVCacheManager()
+
+        # ── Multi-agent system (v3.0) ──────────────────────────────────────
+        self.bus = SharedMemoryBus()
+        self.task_store = TaskStore(db_path=cfg.storage.sqlite_path)
+        self.task_planner = TaskPlanner(llama_client=self.llama_client)
+        # Cap agent concurrency to the llama server's actual slot count so we
+        # never queue more requests than it can serve simultaneously.
+        effective_parallel = min(cfg.agent.max_parallel, cfg.llama.n_parallel)
+        self.agent_pool = AgentPool(
+            llama_client=self.llama_client,
+            bus=self.bus,
+            max_parallel=effective_parallel,
+            task_timeout_s=cfg.agent.task_timeout_s,
+        )
+        self.multi_agent_engine = MultiAgentEngine(
+            planner=self.task_planner,
+            pool=self.agent_pool,
+            bus=self.bus,
+            inference_engine=self.inference_engine,
+            task_store=self.task_store,
+            response_cache=self.response_cache,
+        )
 
     @classmethod
     def get(cls) -> "Container":
@@ -196,6 +240,10 @@ def get_container() -> Container:
 # FastAPI dependency shortcuts
 def get_inference_engine() -> InferenceEngine:
     return Container.get().inference_engine
+
+
+def get_multi_agent_engine() -> MultiAgentEngine:
+    return Container.get().multi_agent_engine
 
 
 def get_rag_pipeline() -> RAGPipeline:

@@ -23,6 +23,9 @@ PORT=8080
 N_THREADS=8          # i5-8350U has 8 threads — use all of them
 N_CTX=4096           # context window
 N_BATCH=512
+# Parallel inference slots (v2.1): set LLAMA_N_PARALLEL=2 to allow 2 concurrent requests.
+# Must match LLAMA_N_PARALLEL in .env so InferenceBatcher knows the slot count.
+N_PARALLEL="${LLAMA_N_PARALLEL:-1}"
 
 # ── GPU auto-detection ────────────────────────────────────────────────────────
 # Priority: LLAMA_GPU_LAYERS env var > nvidia-smi detection > CPU fallback
@@ -127,17 +130,18 @@ if [ -z "$MODEL" ] || [ ! -f "$MODEL" ]; then
 fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  SynapseOS — llama.cpp Server  (build b9279)"
-echo "  Model   : $(basename "$MODEL")"
-echo "  Select  : ${MODEL_REASON}"
-echo "  Port    : $PORT"
-echo "  Threads : $N_THREADS"
-echo "  Context : $N_CTX tokens"
-echo "  GPU     : ${GPU_MODE} (layers=${N_GPU_LAYERS})"
+echo "  SynapseOS — llama.cpp Server  (build b9279, v2.1)"
+echo "  Model    : $(basename "$MODEL")"
+echo "  Select   : ${MODEL_REASON}"
+echo "  Port     : $PORT"
+echo "  Threads  : $N_THREADS"
+echo "  Context  : $N_CTX tokens"
+echo "  Parallel : $N_PARALLEL slots  (set LLAMA_N_PARALLEL to change)"
+echo "  GPU      : ${GPU_MODE} (layers=${N_GPU_LAYERS})"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Chat    : http://localhost:$PORT/v1/chat/completions"
-echo "  Health  : http://localhost:$PORT/health"
-echo "  Docs    : http://localhost:$PORT"
+echo "  Chat     : http://localhost:$PORT/v1/chat/completions"
+echo "  Health   : http://localhost:$PORT/health"
+echo "  Docs     : http://localhost:$PORT"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 export LD_LIBRARY_PATH="${BIN_DIR}:${LD_LIBRARY_PATH}"
@@ -150,5 +154,6 @@ exec "${SERVER}" \
     --ctx-size "$N_CTX" \
     --n-gpu-layers "$N_GPU_LAYERS" \
     --batch-size "$N_BATCH" \
+    --parallel "$N_PARALLEL" \
     --chat-template chatml \
     "$@"

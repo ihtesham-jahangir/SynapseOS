@@ -72,6 +72,73 @@ LLAMA_ERRORS = Counter(
     ["error_type"],
 )
 
+# ── v2.1 Inference batching metrics ──────────────────────────────────────────
+
+INFERENCE_QUEUE_DEPTH = Gauge(
+    "synapseos_inference_queue_depth",
+    "Requests waiting for an inference slot",
+)
+
+INFERENCE_IN_FLIGHT = Gauge(
+    "synapseos_inference_in_flight",
+    "Inference requests currently running on llama.cpp",
+)
+
+INFERENCE_WAIT_MS = Histogram(
+    "synapseos_inference_slot_wait_ms",
+    "Time spent waiting for an inference slot (ms)",
+    buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+)
+
+COMPRESSION_QUEUE_DEPTH = Gauge(
+    "synapseos_compression_queue_depth",
+    "L1→L2 compression jobs waiting in the async queue",
+)
+
+# ── v2.0 Speculative decoding metrics ─────────────────────────────────────────
+
+SPECULATIVE_TOKENS_DRAFTED = Counter(
+    "synapseos_speculative_tokens_drafted_total",
+    "Total tokens proposed by the draft model",
+)
+
+SPECULATIVE_TOKENS_ACCEPTED = Counter(
+    "synapseos_speculative_tokens_accepted_total",
+    "Draft tokens accepted by the verifier",
+)
+
+SPECULATIVE_ACCEPTANCE_RATE = Histogram(
+    "synapseos_speculative_acceptance_rate",
+    "Fraction of draft tokens accepted per speculative generation",
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+)
+
+# ── v3.0 Multi-agent metrics ──────────────────────────────────────────────────
+
+AGENT_TASKS_TOTAL = Counter(
+    "synapseos_agent_tasks_total",
+    "Sub-tasks executed by the agent pool",
+    ["role", "status"],
+)
+
+AGENT_TASK_DURATION_MS = Histogram(
+    "synapseos_agent_task_duration_ms",
+    "Per-agent sub-task execution time (ms)",
+    ["role"],
+    buckets=[50, 100, 250, 500, 1000, 2500, 5000, 10000],
+)
+
+AGENT_POOL_ACTIVE = Gauge(
+    "synapseos_agent_pool_active",
+    "Agent sub-tasks currently executing in the pool",
+)
+
+BUS_MESSAGES_TOTAL = Counter(
+    "synapseos_bus_messages_total",
+    "Messages published on the shared memory bus",
+    ["topic"],
+)
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 

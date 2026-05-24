@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, List, Optional
 
 from orchestrator.core.base import BaseInferenceEngine
@@ -49,6 +50,17 @@ from orchestrator.core.types import (
     Message,
     MessageRole,
 )
+
+
+@dataclass
+class GenerationPlan:
+    """Everything the streaming/generation paths need, built once."""
+    fused: FusedContext
+    params: GenerationParams
+    intent: Intent
+    memory_levels: List[MemoryLevel] = field(default_factory=list)
+    rag_chunks: int = 0
+    session_id: str = ""
 from orchestrator.core.exceptions import LlamaServerError, OrchestratorError
 from orchestrator.config.settings import get_settings
 from orchestrator.utils.logging_utils import get_logger, bind_request_context
@@ -72,6 +84,7 @@ from orchestrator.fusion.fusion_engine import AdaptiveFusionEngine
 from orchestrator.runtime.adaptive_compute import AdaptiveComputeController
 from orchestrator.runtime.llama_client import LlamaClient
 from orchestrator.runtime.speculative import SpeculativeDecoder
+from orchestrator.runtime.request_batcher import InferenceBatcher
 from orchestrator.cache.response_cache import ResponseCache
 
 log = get_logger(__name__)
@@ -97,6 +110,7 @@ class InferenceEngine(BaseInferenceEngine):
         compute_controller: AdaptiveComputeController,
         response_cache: Optional[ResponseCache] = None,
         speculative_decoder: Optional[SpeculativeDecoder] = None,
+        batcher: Optional[InferenceBatcher] = None,
     ) -> None:
         self._llama = llama_client
         self._memory = memory_manager
@@ -108,6 +122,74 @@ class InferenceEngine(BaseInferenceEngine):
         self._compute = compute_controller
         self._cache = response_cache
         self._speculative = speculative_decoder
+        self._batcher = batcher
+
+    # ── Shared pipeline stages (used by both process_request and stream routes) ─
+
+    async def build_generation_plan(self, request: ChatRequest) -> GenerationPlan:
+        """
+        Run pipeline stages 1–6 (intent → routing → memory/RAG → fusion → compute).
+
+        Returns a GenerationPlan that can be passed directly to generate() or stream().
+        Both the blocking and streaming chat handlers use this so the pipeline
+        logic lives in exactly one place.
+        """
+        session_id = request.session_id
+        query = request.last_user_message
+
+        intent = await self._classifier.classify(query)
+        decision = self._router.route(intent)
+
+        stored_conversation = await self._memory.get_conversation(session_id)
+        request_history = [m for m in request.messages[:-1]]
+        if request_history:
+            seen_contents = {m.content for m in stored_conversation}
+            for m in request_history:
+                if m.content not in seen_contents:
+                    stored_conversation.append(m)
+        stored_conversation.append(Message(role=MessageRole.USER, content=query))
+        conversation = stored_conversation
+
+        memory_context = f"{query}\n" + " ".join(m.content for m in conversation[-5:-1])
+        memory_result, rag_result, expert_guidance = await gather_with_fallback(
+            self._memory.retrieve_all(memory_context, session_id),
+            self._rag.retrieve(query) if decision.run_rag else _empty_rag(),
+            self._experts.get_guidance(query, intent, decision.active_experts),
+            fallbacks=[_empty_memory_result(), _empty_rag_result(), None],
+        )
+
+        fused = await self._fusion.fuse(
+            query=query,
+            intent=intent,
+            memory_result=memory_result,
+            rag_result=rag_result,
+            expert_guidance=expert_guidance,
+            conversation=conversation,
+            system_prompt=decision.system_prompt_hint,
+        )
+
+        cfg = get_settings().generation
+        request_base = GenerationParams(
+            max_tokens=request.max_tokens or cfg.max_tokens,
+            temperature=request.temperature or cfg.temperature,
+            top_p=request.top_p or cfg.top_p,
+            top_k=cfg.top_k,
+            repeat_penalty=cfg.repeat_penalty,
+        )
+        params = self._compute.optimize(
+            intent=intent,
+            fused_context=fused,
+            base_params=decision.generation_override or request_base,
+        )
+
+        return GenerationPlan(
+            fused=fused,
+            params=params,
+            intent=intent,
+            memory_levels=memory_result.levels_queried,
+            rag_chunks=len(rag_result.chunks),
+            session_id=session_id,
+        )
 
     # ── Main pipeline ─────────────────────────────────────────────────────────
 
@@ -120,7 +202,7 @@ class InferenceEngine(BaseInferenceEngine):
         bind_request_context(session_id)
 
         try:
-            # ── Stage 1: Intent classification ────────────────────────────────
+            # ── Stage 1: Intent classification (needed for cache key) ─────────
             intent = await self._classifier.classify(query)
             tracker.checkpoint("intent")
 
@@ -156,67 +238,20 @@ class InferenceEngine(BaseInferenceEngine):
                         },
                     )
 
-            # ── Stage 3: Routing decision ──────────────────────────────────────
-            decision = self._router.route(intent)
-            tracker.checkpoint("route")
-
-            # ── Stage 4: Parallel fan-out ──────────────────────────────────────
-            stored_conversation = await self._memory.get_conversation(session_id)
-
-            # Merge in-request history (all but the last user turn)
-            request_history = [m for m in request.messages[:-1]]
-            if request_history:
-                seen_contents = {m.content for m in stored_conversation}
-                for m in request_history:
-                    if m.content not in seen_contents:
-                        stored_conversation.append(m)
-
-            # Append current user message so it appears last
-            stored_conversation.append(Message(role=MessageRole.USER, content=query))
-            conversation = stored_conversation
-
-            memory_context = f"{query}\n" + " ".join(
-                m.content for m in conversation[-5:-1]
-            )
-
-            memory_result, rag_result, expert_guidance = await gather_with_fallback(
-                self._memory.retrieve_all(memory_context, session_id),
-                self._rag.retrieve(query) if decision.run_rag else _empty_rag(),
-                self._experts.get_guidance(query, intent, decision.active_experts),
-                fallbacks=[_empty_memory_result(), _empty_rag_result(), None],
-            )
-            tracker.checkpoint("parallel_fanout")
-
-            # ── Stage 5: Adaptive Fusion ──────────────────────────────────────
-            fused = await self._fusion.fuse(
-                query=query,
-                intent=intent,
-                memory_result=memory_result,
-                rag_result=rag_result,
-                expert_guidance=expert_guidance,
-                conversation=conversation,
-                system_prompt=decision.system_prompt_hint,
-            )
-            tracker.checkpoint("fusion")
-
-            # ── Stage 6: Adaptive compute ─────────────────────────────────────
-            cfg = get_settings().generation
-            request_base = GenerationParams(
-                max_tokens=request.max_tokens or cfg.max_tokens,
-                temperature=request.temperature or cfg.temperature,
-                top_p=request.top_p or cfg.top_p,
-                top_k=cfg.top_k,
-                repeat_penalty=cfg.repeat_penalty,
-            )
-            gen_params = self._compute.optimize(
-                intent=intent,
-                fused_context=fused,
-                base_params=decision.generation_override or request_base,
-            )
+            # ── Stages 3–6: routing → memory/RAG → fusion → compute ───────────
+            plan = await self.build_generation_plan(request)
+            tracker.checkpoint("pipeline")
 
             # ── Stage 7: Llama inference ──────────────────────────────────────
-            inference_resp = await self.generate(fused, gen_params)
+            inference_resp = await self.generate(plan.fused, plan.params)
             tracker.checkpoint("inference")
+
+            # Unpack aliases needed below
+            fused = plan.fused
+            gen_params = plan.params
+            memory_result_levels = plan.memory_levels
+            rag_chunks = plan.rag_chunks
+            expert_guidance = None  # used only for expert_used field
 
             total_ms = tracker.elapsed_ms()
 
@@ -266,9 +301,9 @@ class InferenceEngine(BaseInferenceEngine):
                 total_tokens=fused.total_token_count + inference_resp.tokens_generated,
                 time_to_first_token_ms=inference_resp.time_to_first_token_ms,
                 total_time_ms=total_ms,
-                memory_levels_used=memory_result.levels_queried,
-                rag_chunks_used=len(rag_result.chunks),
-                expert_used=expert_guidance.expert_type if expert_guidance else None,
+                memory_levels_used=memory_result_levels,
+                rag_chunks_used=rag_chunks,
+                expert_used=None,
                 metadata=tracker.report(),
             )
 
@@ -319,40 +354,47 @@ class InferenceEngine(BaseInferenceEngine):
         context: FusedContext,
         params: GenerationParams,
     ) -> InferenceResponse:
-        """Run non-streaming generation (with speculative decoding when available)."""
+        """Run non-streaming generation (slot-controlled via InferenceBatcher)."""
         messages = context.to_messages()
         t0 = time.perf_counter()
 
-        if self._speculative is not None:
-            content = await self._speculative.generate(
-                messages=messages,
-                max_tokens=params.max_tokens,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                top_k=params.top_k,
-                repeat_penalty=params.repeat_penalty,
-                stop=params.stop_sequences,
-            )
+        if self._batcher is not None:
+            async with self._batcher.acquire():
+                content = await self._run_generate(messages, params)
         else:
-            content = await self._llama.chat(
-                messages=messages,
-                max_tokens=params.max_tokens,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                top_k=params.top_k,
-                repeat_penalty=params.repeat_penalty,
-                stop=params.stop_sequences,
-            )
+            content = await self._run_generate(messages, params)
 
         total_ms = (time.perf_counter() - t0) * 1000
-        tokens_gen = len(content.split())  # approximate
+        tokens_gen = len(content.split())
 
         return InferenceResponse(
             content=content,
             tokens_generated=tokens_gen,
             prompt_tokens=context.total_token_count,
-            time_to_first_token_ms=total_ms * 0.3,  # estimate
+            time_to_first_token_ms=total_ms * 0.3,
             total_time_ms=total_ms,
+        )
+
+    async def _run_generate(self, messages: list, params: GenerationParams) -> str:
+        """Inner generation call — speculative or direct."""
+        if self._speculative is not None:
+            return await self._speculative.generate(
+                messages=messages,
+                max_tokens=params.max_tokens,
+                temperature=params.temperature,
+                top_p=params.top_p,
+                top_k=params.top_k,
+                repeat_penalty=params.repeat_penalty,
+                stop=params.stop_sequences,
+            )
+        return await self._llama.chat(
+            messages=messages,
+            max_tokens=params.max_tokens,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            top_k=params.top_k,
+            repeat_penalty=params.repeat_penalty,
+            stop=params.stop_sequences,
         )
 
     async def stream(
@@ -360,8 +402,18 @@ class InferenceEngine(BaseInferenceEngine):
         context: FusedContext,
         params: GenerationParams,
     ) -> AsyncGenerator[str, None]:
-        """Streaming generation – yields token strings."""
+        """Streaming generation — slot-controlled, yields token strings."""
         messages = context.to_messages()
+        if self._batcher is not None:
+            async with self._batcher.acquire():
+                async for token in self._run_stream(messages, params):
+                    yield token
+        else:
+            async for token in self._run_stream(messages, params):
+                yield token
+
+    async def _run_stream(self, messages: list, params: GenerationParams) -> AsyncGenerator[str, None]:
+        """Inner streaming call."""
         async for token in self._llama.stream_chat(
             messages=messages,
             max_tokens=params.max_tokens,

@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
 CREATE INDEX IF NOT EXISTS idx_l2_session ON conversation_summaries(session_id);
 """
 
+# WAL-mode pragmas run after schema creation (file-level; silently ignored for :memory:)
+_WAL_PRAGMAS = [
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA synchronous=NORMAL",
+]
+
 
 class L2SummaryCache(BaseMemoryStore):
     """
@@ -53,8 +59,11 @@ class L2SummaryCache(BaseMemoryStore):
             return
         async with aiosqlite.connect(self._db_path) as db:
             await db.executescript(_SCHEMA)
+            for pragma in _WAL_PRAGMAS:
+                await db.execute(pragma)
             await db.commit()
         self._initialized = True
+        log.debug("L2 SQLite initialised", db=self._db_path, wal=True)
 
     async def store(self, item: MemoryItem) -> None:
         await self._init()

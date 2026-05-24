@@ -28,6 +28,7 @@ from .l2_cache import L2SummaryCache
 from .l3_cache import L3VectorMemory
 from .l4_cache import L4KnowledgeBase
 from .compressor import ContextCompressor
+from .compression_queue import CompressionQueue
 
 log = get_logger(__name__)
 
@@ -56,14 +57,16 @@ class MemoryManager:
         l3: L3VectorMemory,
         l4: L4KnowledgeBase,
         compressor: Optional[ContextCompressor] = None,
+        compression_queue: Optional[CompressionQueue] = None,
     ) -> None:
         self._l1 = l1
         self._l2 = l2
         self._l3 = l3
         self._l4 = l4
         self._compressor = compressor
+        self._compression_queue = compression_queue
         self._cfg = get_settings().memory
-        self._compression_locks: dict = {}
+        self._compression_locks: dict = {}  # fallback when no queue is wired
 
     async def record_turn(
         self,
@@ -80,8 +83,21 @@ class MemoryManager:
 
         # Check if compression is needed
         current_tokens = self._l1.session_token_count(session_id)
-        if current_tokens > self._cfg.l1_max_tokens * 0.85:
-            asyncio.create_task(self._compress_session(session_id))
+        l1_capacity = self._l1._max_tokens
+        if current_tokens > l1_capacity * 0.85:
+            if self._compression_queue is not None:
+                # v2.1: queue-based async compression (rate-limited, deduplicated)
+                turns = await self._l1.get_turns(session_id)
+                split = len(turns) // 2
+                await self._compression_queue.submit(
+                    session_id=session_id,
+                    turns=turns[:split],
+                    turn_start=0,
+                    turn_end=split,
+                )
+            else:
+                # fallback: ad-hoc task (no rate limiting)
+                asyncio.create_task(self._compress_session(session_id))
 
     async def _compress_session(self, session_id: str) -> None:
         """Background compression of L1 overflow into L2 summary."""

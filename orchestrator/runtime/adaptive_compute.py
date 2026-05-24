@@ -94,6 +94,9 @@ class AdaptiveComputeController:
         seen = set()
         stop = [s for s in stop if not (s in seen or seen.add(s))]
 
+        # Clamp temperature to a valid range regardless of base_params source
+        temperature = max(0.05, min(2.0, temperature))
+
         optimized = GenerationParams(
             max_tokens=max_tokens,
             temperature=temperature,
