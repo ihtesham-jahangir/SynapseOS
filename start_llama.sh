@@ -27,6 +27,19 @@ N_BATCH=512
 # Must match LLAMA_N_PARALLEL in .env so InferenceBatcher knows the slot count.
 N_PARALLEL="${LLAMA_N_PARALLEL:-2}"
 
+# ── Auto-extract bundled binary ───────────────────────────────────────────────
+# The repo ships a pre-built Ubuntu x86-64 binary as a tar.gz (~14 MB).
+# Extract it on first run so users never need a manual step.
+if [ ! -f "${SERVER}" ]; then
+    TARBALL="${SCRIPT_DIR}/bin/llama-b9279-ubuntu-x64.tar.gz"
+    if [ -f "${TARBALL}" ]; then
+        echo "  Extracting bundled llama-server binary (first run)..."
+        (cd "${SCRIPT_DIR}/bin" && tar xzf llama-b9279-ubuntu-x64.tar.gz)
+        chmod +x "${SERVER}"
+        echo "  Done — binary ready at ${SERVER}"
+    fi
+fi
+
 # ── GPU auto-detection ────────────────────────────────────────────────────────
 # Priority: LLAMA_GPU_LAYERS env var > NVIDIA detection > Vulkan detection > CPU
 # NOTE: Intel iGPU requires Vulkan-enabled llama.cpp binary. Only auto-enable

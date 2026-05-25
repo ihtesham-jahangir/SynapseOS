@@ -1,0 +1,106 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Python Virtual Environments
+venv/
+ENV/
+env/
+.venv/
+
+# Python Cache Files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Large Binary Files — extracted directory ignored (102 MB), archive tracked (14 MB)
+bin/llama-b9279/
+*.so*
+*.dll
+*.dylib
+
+# Large Model Files
+models/*.gguf
+models/*.bin
+models/*.pt
+models/*.pth
+models/*.safetensors
+
+# Cache and Index Files
+data/
+data/*.faiss
+data/*.meta
+cache/
+*.cache
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+.tox/
+coverage.xml
+.coverage
+htmlcov/
+
+# Monitoring and Logs
+logs/
+*.log
+monitoring/prometheus-local.yml
+
+# Docker Build Files
+docker-compose.override.yml
+.docker/
+.dockerignore
+
+# OS and Temporary Files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Other
+.git/
+.gitignore
+node_modules/
+package-lock.json

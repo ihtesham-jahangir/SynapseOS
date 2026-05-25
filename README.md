@@ -387,6 +387,580 @@ docker run -d --name synapseos-grafana --network host \
 
 ---
 
+## System Requirements
+
+> Minimum specs to run a 3B quantized model on CPU. Larger models require proportionally more RAM.
+
+| Component | Minimum | Recommended | Notes |
+|-----------|---------|-------------|-------|
+| **RAM** | 4 GB | 8 GB | 4 GB for TinyLlama 1.1B · 8 GB for 3B · 16 GB for 7B |
+| **CPU cores** | 2 physical | 4 physical | Hyperthreading (SMT) hurts LLM matrix multiply — physical cores only |
+| **Disk space** | 5 GB | 10 GB | OS + venv (~1.5 GB) + 3B model (~2.2 GB) + indexes |
+| **Python** | 3.11 | 3.11+ | 3.10 may work; 3.12 not tested |
+| **OS** | Ubuntu 20.04 / Debian 11 | Ubuntu 22.04 / 24.04 | Any x86-64 Linux with glibc ≥ 2.31 |
+| **GPU** | — | NVIDIA (VRAM ≥ 4 GB) | Optional — CPU-only works; NVIDIA gives 10–50× speedup |
+
+**Low-RAM systems (< 6 GB):** Use TinyLlama 1.1B (~700 MB). Set `DEFAULT_MAX_TOKENS=128`, `LLAMA_CONTEXT_SIZE=1024`, `AGENT_ENABLED=false` in `.env`.
+
+---
+
+## Understanding the Components
+
+New to local LLM inference? Here is what each piece does before you install anything.
+
+<details>
+<summary><strong>What is llama.cpp?</strong></summary>
+
+[llama.cpp](https://github.com/ggerganov/llama.cpp) is a C++ inference engine that runs large language models on ordinary hardware — no Python, no GPU required. It exposes an OpenAI-compatible HTTP API (`POST /v1/chat/completions`) that SynapseOS calls on `localhost:8080`. SynapseOS ships a pre-built binary at `bin/llama-b9279/llama-server` so you do not need to compile anything.
+
+</details>
+
+<details>
+<summary><strong>What is a GGUF model file?</strong></summary>
+
+GGUF (GPT-Generated Unified Format) is a portable model format developed by the llama.cpp project. A `.gguf` file contains the full model weights in a quantized (compressed) form — for example `Q5_K_M` means 5-bit quantization using the K-Means method, giving about 60–70% of full-precision quality at roughly ¼ of the file size. You download one file and point SynapseOS at it. Models are available on [Hugging Face](https://huggingface.co/models?library=gguf).
+
+</details>
+
+<details>
+<summary><strong>What does each startup script do?</strong></summary>
+
+| Script | What it starts | Port |
+|--------|----------------|------|
+| `./start_llama.sh` | llama.cpp inference server — the actual model | 8080 |
+| `./start_api.sh` | SynapseOS FastAPI orchestration layer | 8000 |
+| `./start_draft.sh` | Optional draft model for speculative decoding | 8081 |
+
+**Always start `start_llama.sh` first.** `start_api.sh` connects to it on startup. If the llama server is not running, the health check will report `llama_server: unhealthy`.
+
+</details>
+
+<details>
+<summary><strong>Why run locally instead of using a cloud API?</strong></summary>
+
+- **Privacy:** No data leaves your machine — patient records, legal documents, source code, and proprietary data stay local.
+- **Cost:** After the one-time hardware cost, inference is free — no per-token billing.
+- **Latency:** No network round-trip to a remote data center.
+- **Control:** You choose the model, quantization level, and generation parameters.
+- **Compliance:** GDPR, HIPAA, SOC 2, and air-gapped environments require on-premise processing.
+
+</details>
+
+---
+
+## Fresh Ubuntu / Debian VPS Setup
+
+Complete walkthrough for a clean Ubuntu 22.04 or Debian 12 server with nothing pre-installed.
+
+```bash
+# ── 1. Update system packages ─────────────────────────────────────────────────
+sudo apt update && sudo apt upgrade -y
+
+# ── 2. Install required system dependencies ───────────────────────────────────
+sudo apt install -y \
+    python3 python3-venv python3-pip \
+    git curl wget ca-certificates \
+    build-essential cmake
+
+# ── 3. Clone the repository ───────────────────────────────────────────────────
+git clone https://github.com/ihtesham-jahangir/SynapseOS
+cd SynapseOS
+
+# ── 4. Extract the bundled llama.cpp binary ───────────────────────────────────
+# A pre-built binary for Ubuntu x86-64 (glibc ≥ 2.31) is included in the repo.
+cd bin && tar xzf llama-b9279-ubuntu-x64.tar.gz && cd ..
+# Verify:
+ls bin/llama-b9279/llama-server   # should print the path
+
+# ── 5. Create Python virtual environment ──────────────────────────────────────
+python3 -m venv venv
+source venv/bin/activate
+
+# ── 6. Install Python dependencies ───────────────────────────────────────────
+pip install --upgrade pip
+# requirements.txt uses --extra-index-url for CPU-only PyTorch (~187 MB, not ~1.9 GB)
+pip install -r requirements.txt
+
+# ── 7. Configure environment ──────────────────────────────────────────────────
+cp .env.example .env
+# Edit .env if needed — defaults work for a first run
+
+# ── 8. Create models directory and download a model ───────────────────────────
+mkdir -p models
+# Llama-3.2-3B — good quality, ~2.2 GB, runs on 6 GB RAM
+curl -L \
+  https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q5_K_M.gguf \
+  -o models/Llama-3.2-3B-Instruct-Q5_K_M.gguf
+
+# ── 9. Start llama.cpp inference server (terminal 1) ─────────────────────────
+./start_llama.sh
+
+# ── 10. Start SynapseOS API (terminal 2) ─────────────────────────────────────
+source venv/bin/activate
+./start_api.sh
+
+# ── 11. Verify everything is running ─────────────────────────────────────────
+curl http://localhost:8000/health/live
+# Expected: {"status":"alive"}
+
+curl http://localhost:8000/health
+# Expected: {"status":"healthy","components":[...]}
+```
+
+> **Tip for VPS users:** Run each server in a separate `tmux` or `screen` session so they survive SSH disconnects.
+> ```bash
+> sudo apt install -y tmux
+> tmux new -s llama      # start_llama.sh here
+> tmux new -s api        # start_api.sh here
+> ```
+
+---
+
+## Troubleshooting / Common Installation Issues
+
+---
+
+### 1 — `python3-venv` not installed
+
+**Error:**
+```
+The virtual environment was not created successfully because ensurepip is not available.
+```
+or
+```
+Error: Command '['.../python3', '-Im', 'ensurepip', '--upgrade', ...]' returned non-zero exit status 1
+```
+
+**Cause:** Minimal Ubuntu/Debian images ship Python 3 without the `venv` or `pip` modules. These are separate packages on Debian-based systems.
+
+**Fix:**
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip
+```
+
+Then recreate the virtual environment:
+```bash
+rm -rf venv
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+### 2 — `pip` command not found
+
+**Error:**
+```
+Command 'pip' not found, but can be installed with:
+sudo apt install python3-pip
+```
+or
+```
+pip: command not found
+```
+
+**Cause:** Minimal Ubuntu/Debian systems install `python3` without `pip`. Additionally, `pip` (without the `3` suffix) is not always symlinked automatically.
+
+**Fix:**
+```bash
+sudo apt update
+sudo apt install -y python3-pip
+
+# Verify
+python3 -m pip --version
+```
+
+> Always invoke pip via `python3 -m pip` inside the virtual environment to ensure you are targeting the right Python installation. After activating the venv (`source venv/bin/activate`), plain `pip` works correctly.
+
+---
+
+### 3 — No `.gguf` model found
+
+**Error:**
+```
+ERROR: No .gguf model found in /path/to/SynapseOS/models/
+```
+
+**Cause:** The `models/` directory is empty or does not exist. Model weights are not bundled in the repository (they are several GB in size).
+
+**Step 1 — Create the models directory:**
+```bash
+mkdir -p models
+```
+
+**Step 2 — Download a model (choose one):**
+
+| Model | RAM required | File size | Speed (CPU) | Best for |
+|-------|-------------|-----------|-------------|----------|
+| TinyLlama 1.1B Q5_K_M | 2 GB | ~700 MB | Fastest | Low-RAM VPS, draft model |
+| Llama-3.2-3B Q5_K_M | 6 GB | ~2.2 GB | Good | Default recommendation |
+| Llama-3.2-8B Q4_K_M | 10 GB | ~4.9 GB | Moderate | Higher quality |
+| Qwen2.5-7B Q4_K_M | 10 GB | ~4.4 GB | Moderate | Coding + multilingual |
+
+```bash
+# Recommended default — Llama-3.2-3B (~2.2 GB)
+curl -L \
+  https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q5_K_M.gguf \
+  -o models/Llama-3.2-3B-Instruct-Q5_K_M.gguf
+
+# Low-RAM alternative — TinyLlama 1.1B (~700 MB)
+curl -L \
+  https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf \
+  -o models/tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf
+```
+
+**Step 3 — Verify the download:**
+```bash
+ls -lh models/
+# Should show the .gguf file with the expected size
+```
+
+**Alternative — point to a model on a different path:**
+```bash
+# Override without moving the file
+LLAMA_MODEL_PATH=/absolute/path/to/your-model.gguf ./start_llama.sh
+```
+Or add to `.env`:
+```env
+LLAMA_MODEL_PATH=/absolute/path/to/your-model.gguf
+```
+
+---
+
+### 4 — `llama-server` binary missing or permission denied
+
+**Error:**
+```
+./start_llama.sh: line XX: bin/llama-b9279/llama-server: No such file or directory
+```
+or
+```
+permission denied: ./bin/llama-b9279/llama-server
+```
+
+**Cause A — The bundled archive was never extracted.** The repository includes a pre-built binary for Ubuntu x86-64 as a compressed archive at `bin/llama-b9279-ubuntu-x64.tar.gz`.
+
+**Fix A — Extract the bundled binary (try this first):**
+```bash
+cd bin
+tar xzf llama-b9279-ubuntu-x64.tar.gz
+cd ..
+
+# Make executable
+chmod +x bin/llama-b9279/llama-server
+
+# Verify
+./bin/llama-b9279/llama-server --version
+```
+
+**Cause B — glibc version mismatch.** The pre-built binary targets Ubuntu 22.04 (glibc ≥ 2.35). Older systems (Ubuntu 20.04 / Debian 11, glibc 2.31) may see:
+```
+./llama-server: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.33' not found
+```
+
+**Fix B — Build llama.cpp from source:**
+```bash
+# Install build dependencies
+sudo apt update
+sudo apt install -y build-essential cmake git
+
+# Clone and build (takes 5–15 minutes on a typical VPS)
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+cmake -B build -DLLAMA_BUILD_SERVER=ON
+cmake --build build --config Release -j$(nproc)
+
+# Copy binaries into the expected SynapseOS path
+mkdir -p ../bin/llama-b9279
+cp build/bin/llama-server ../bin/llama-b9279/llama-server
+# Copy required shared libraries
+cp build/bin/lib*.so* ../bin/llama-b9279/ 2>/dev/null || true
+
+cd ..
+
+# Verify
+chmod +x bin/llama-b9279/llama-server
+./bin/llama-b9279/llama-server --version
+```
+
+> **NVIDIA GPU build:** Add `-DGGML_CUDA=ON` to the cmake command. Requires CUDA toolkit ≥ 11.7 and `nvcc` in PATH.
+> ```bash
+> cmake -B build -DLLAMA_BUILD_SERVER=ON -DGGML_CUDA=ON
+> ```
+
+---
+
+### 5 — `venv/bin/activate` not found
+
+**Error:**
+```
+./start_api.sh: line XX: venv/bin/activate: No such file or directory
+```
+
+**Cause:** The virtual environment was never created, or its creation failed (most commonly due to the missing `python3-venv` package — see issue #1 above).
+
+**Fix:**
+```bash
+# First, ensure python3-venv is installed
+sudo apt install -y python3-venv python3-pip
+
+# Remove any broken venv directory
+rm -rf venv
+
+# Recreate
+python3 -m venv venv
+
+# Activate and install dependencies
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Verify
+which python   # should point to venv/bin/python
+```
+
+---
+
+### 6 — `start_api.sh` fails because llama server is not running
+
+**Error in `/health` response:**
+```json
+{"status": "unhealthy", "components": [{"name": "llama_server", "status": "unhealthy"}]}
+```
+or startup error:
+```
+ConnectionRefusedError: [Errno 111] Connection refused
+```
+
+**Cause:** `start_api.sh` must be started **after** `start_llama.sh` is fully initialized.
+
+**Fix:** Wait for the llama server to print its ready message before starting the API:
+```bash
+# Terminal 1 — wait until you see:
+# "llama server listening at http://0.0.0.0:8080"
+./start_llama.sh
+
+# Terminal 2 — only then run:
+source venv/bin/activate
+./start_api.sh
+```
+
+To test whether the llama server is ready:
+```bash
+curl http://localhost:8080/health
+# Expected: {"status":"ok"}
+```
+
+---
+
+### 7 — `pip install -r requirements.txt` fails on `torch` or `faiss-cpu`
+
+**Error:**
+```
+ERROR: Could not find a version that satisfies the requirement torch==2.2.1
+```
+or memory killed during install:
+```
+Killed
+```
+
+**Cause A — Old pip:** pip < 22 cannot resolve modern PyTorch wheel URLs.
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+**Cause B — System ran out of RAM during install (common on 1–2 GB VPS):**
+```bash
+# Add a 2 GB swap file to prevent OOM kills during install
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+pip install -r requirements.txt
+```
+
+**Cause C — CPU-only PyTorch (saves ~2 GB disk space):**
+```bash
+pip install torch==2.2.1+cpu --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+```
+
+---
+
+### 8 — `torch` installed but CUDA not detected (GPU not used)
+
+**Symptom:** Model runs on CPU even though you have an NVIDIA GPU.
+
+**Diagnosis:**
+```bash
+python3 -c "import torch; print(torch.cuda.is_available())"
+# If False — CUDA PyTorch is not installed
+```
+
+**Fix:**
+```bash
+# Reinstall with CUDA 12.1 support
+pip install torch==2.2.1 --index-url https://download.pytorch.org/whl/cu121
+```
+
+Then in `.env`:
+```env
+LLAMA_GPU_LAYERS=99
+EMBEDDING_DEVICE=cuda
+```
+
+---
+
+### 9 — `rank-bm25` version not found
+
+**Error:**
+```
+ERROR: Could not find a version that satisfies the requirement rank-bm25>=0.7.2
+ERROR: No matching distribution found for rank-bm25>=0.7.2
+```
+
+**Cause:** The version constraint `>=0.7.2` was set incorrectly — the highest version ever published to PyPI is `0.2.2`. The requirement file has been corrected in this release. If you cloned an older commit, fix it manually:
+
+```bash
+sed -i 's/rank-bm25>=0.7.2/rank-bm25==0.2.2/' requirements.txt
+pip install rank-bm25==0.2.2
+```
+
+---
+
+### 10 — `torch` CUDA download fails or is too large (CPU-only VPS)
+
+**Error:**
+```
+Downloading nvidia_cudnn_cu12-8.9.2.26 ... (731.7 MB)
+pip._vendor.urllib3.exceptions.ProtocolError: Connection broken: IncompleteRead(...)
+```
+or the download simply stalls for 10+ minutes pulling ~1.9 GB of NVIDIA libraries on a machine with no GPU.
+
+**Cause:** `torch==2.2.1` (without a `+cpu` suffix) pulls full CUDA wheels from PyPI by default — `nvidia-cudnn-cu12` (~731 MB), `nvidia-cublas-cu12` (~410 MB), and several more. On a CPU-only VPS these are useless, and unreliable network connections cause `IncompleteRead` failures mid-download.
+
+SynapseOS uses **llama.cpp** for all LLM inference. PyTorch is only needed for the BGE embedding model, which runs fine on CPU. The `requirements.txt` has been updated to use `torch==2.2.1+cpu` (~187 MB) by default.
+
+**Fix if you already have a broken install:**
+```bash
+# 1. Purge the pip download cache to free disk space
+pip cache purge
+
+# 2. Install the CPU-only torch wheel first (~187 MB instead of ~1.9 GB)
+pip install torch==2.2.1+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# 3. Install the rest (torch is now satisfied, pip skips it)
+pip install --no-cache-dir -r requirements.txt
+```
+
+**Verify torch is CPU-only and working:**
+```bash
+python3 -c "import torch; print(torch.__version__)"
+# Expected: 2.2.1+cpu
+```
+
+> **GPU users:** If you have a NVIDIA GPU and want CUDA-accelerated embeddings, replace `torch==2.2.1+cpu` with `torch==2.2.1` and remove the `--extra-index-url` line from `requirements.txt`, then reinstall with `pip install torch==2.2.1 --index-url https://download.pytorch.org/whl/cu121`.
+
+---
+
+## Performance Optimization for Low-Resource Systems
+
+### CPU-only deployment (the default)
+
+SynapseOS is tuned for CPU-only inference out of the box. The key constraint is RAM — the model must fit in RAM, otherwise the OS will page it to swap and throughput drops below 0.5 tok/s.
+
+```bash
+# Check available RAM before starting
+free -h
+
+# Flush swap before starting (recovers paged RAM — run with llama server stopped)
+sudo swapoff -a && sudo swapon -a
+free -h   # verify Swap used column is near 0
+```
+
+### Reducing context size (less RAM, faster prefill)
+
+Edit `.env`:
+```env
+LLAMA_CONTEXT_SIZE=1024      # reduce from 2048 — halves KV cache memory
+CONTEXT_TOKEN_BUDGET=700     # must be < LLAMA_CONTEXT_SIZE - DEFAULT_MAX_TOKENS
+DEFAULT_MAX_TOKENS=128       # shorter answers for constrained systems
+L1_MAX_TOKENS=256
+L2_MAX_TOKENS=512
+```
+
+And in `start_llama.sh`, or by passing flags directly:
+```bash
+./bin/llama-b9279/llama-server \
+  --model models/your-model.gguf \
+  --threads 4 \
+  --ctx-size 1024 \
+  --parallel 1 \
+  --batch-size 256 \
+  --chat-template chatml
+```
+
+### Reducing parallel inference slots (less RAM contention)
+
+Each parallel slot duplicates the KV cache. On memory-constrained systems, set to 1:
+```env
+LLAMA_N_PARALLEL=1
+```
+And pass `--parallel 1` to `start_llama.sh`.
+
+### TinyLlama for very low RAM (< 4 GB available)
+
+```bash
+# Download TinyLlama 1.1B — ~700 MB, runs on 2 GB RAM
+curl -L \
+  https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf \
+  -o models/tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf
+```
+
+Pair with these `.env` settings:
+```env
+LLAMA_CONTEXT_SIZE=1024
+CONTEXT_TOKEN_BUDGET=700
+DEFAULT_MAX_TOKENS=128
+AGENT_ENABLED=false          # disable multi-agent — saves memory and compute
+L1_MAX_TOKENS=256
+L2_MAX_TOKENS=512
+LLAMA_N_PARALLEL=1
+```
+
+### Thread count tuning
+
+Always use **physical core count only** — hyperthreading hurts LLM matrix multiply performance:
+
+```bash
+# Check physical core count (not hyperthreads)
+lscpu | grep "Core(s) per socket"
+# Example output: Core(s) per socket: 4
+
+# Set in start_llama.sh or .env:
+LLAMA_THREADS=4
+```
+
+### Monitoring throughput
+
+```bash
+# Watch token throughput in real time via Prometheus
+curl -s http://localhost:8000/metrics | grep synapseos_tokens_per_second
+```
+
+Or via a simple test:
+```bash
+time curl -s -X POST http://localhost:8000/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"bench","messages":[{"role":"user","content":"Count from 1 to 20."}]}'
+```
+
+---
+
 ## API Reference
 
 ### Chat

@@ -1,4 +1,9 @@
-# ── Core framework ──────────────────────────────────────────────────────────
+# PyTorch CPU-only wheels — avoids downloading CUDA libraries (~1.9 GB) on CPU-only VPS.
+# SynapseOS uses llama.cpp for LLM inference; PyTorch is only needed for BGE embeddings.
+# GPU users: replace torch==2.2.1+cpu with torch==2.2.1 and remove this line.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# ── Core framework ───────────────────────────────────────────────────────────
 fastapi==0.109.2
 uvicorn[standard]==0.27.1
 pydantic==2.6.3
@@ -15,8 +20,8 @@ aiofiles==23.2.1
 # ── ML / embeddings ──────────────────────────────────────────────────────────
 sentence-transformers==2.6.1
 transformers==4.39.1
-rank-bm25>=0.7.2
-torch==2.2.1
+rank-bm25==0.2.2
+torch==2.2.1+cpu
 numpy==1.26.4
 scipy==1.12.0
 

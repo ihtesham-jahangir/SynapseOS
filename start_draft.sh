@@ -37,6 +37,17 @@ N_THREADS=4
 N_CTX=2048    # smaller context saves RAM; draft only needs K+1 tokens at a time
 N_BATCH=128
 
+# ── Auto-extract bundled binary ───────────────────────────────────────────────
+if [ ! -f "${SERVER}" ]; then
+    TARBALL="${SCRIPT_DIR}/bin/llama-b9279-ubuntu-x64.tar.gz"
+    if [ -f "${TARBALL}" ]; then
+        echo "  Extracting bundled llama-server binary (first run)..."
+        (cd "${SCRIPT_DIR}/bin" && tar xzf llama-b9279-ubuntu-x64.tar.gz)
+        chmod +x "${SERVER}"
+        echo "  Done — binary ready at ${SERVER}"
+    fi
+fi
+
 # ── GPU layers for draft model ────────────────────────────────────────────────
 N_GPU_LAYERS=0
 if [ -n "$LLAMA_DRAFT_GPU_LAYERS" ]; then
