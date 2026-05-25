@@ -16,6 +16,7 @@ from orchestrator.core.exceptions import EmbeddingError
 from orchestrator.config.settings import get_settings
 from orchestrator.utils.logging_utils import get_logger
 from orchestrator.utils.async_utils import run_in_executor, AsyncLRUCache
+from orchestrator.utils.circuit_breaker import CircuitBreaker
 
 log = get_logger(__name__)
 
@@ -34,10 +35,15 @@ class BGEEmbedder(BaseEmbedder):
         self._model_lock = asyncio.Lock()
         self._cache: AsyncLRUCache = AsyncLRUCache(maxsize=1024)
         self._settings = get_settings().embedding
+        self._circuit = CircuitBreaker(
+            name="embedding", failure_threshold=3, recovery_timeout_s=60.0
+        )
 
     async def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
+        if self._circuit.is_open():
+            raise EmbeddingError("Embedding model circuit breaker is open — load failed recently")
         async with self._model_lock:
             if self._model is not None:
                 return
@@ -46,8 +52,10 @@ class BGEEmbedder(BaseEmbedder):
                 self._model = await run_in_executor(
                     self._load_model, self._settings.model, self._settings.device
                 )
+                self._circuit.record_success()
                 log.info("Embedding model loaded", model=self._settings.model)
             except Exception as exc:
+                self._circuit.record_failure()
                 raise EmbeddingError(f"Failed to load embedding model: {exc}") from exc
 
     @staticmethod
@@ -87,9 +95,13 @@ class BGEEmbedder(BaseEmbedder):
                 uncached_texts.append(text)
 
         if uncached_texts:
+            if self._circuit.is_open():
+                raise EmbeddingError("Embedding circuit breaker is open — skipping inference")
             try:
                 vectors = await run_in_executor(self._encode_sync, uncached_texts)
+                self._circuit.record_success()
             except Exception as exc:
+                self._circuit.record_failure()
                 raise EmbeddingError(f"Embedding inference failed: {exc}") from exc
 
             for local_i, global_i in enumerate(uncached_idx):

@@ -78,6 +78,46 @@ class TaskStore:
             await db.commit()
         log.debug("TaskStore: saved task", task_id=graph.id, status=graph.status.value)
 
+    async def list(
+        self,
+        session_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list:
+        """Return lightweight task summaries (no sub_tasks payload) for listing."""
+        await self._init()
+        if session_id:
+            query = (
+                "SELECT id, session_id, original_query, status, final_answer, "
+                "total_elapsed_ms, created_at, completed_at "
+                "FROM agent_tasks WHERE session_id = ? "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            )
+            params = (session_id, limit, offset)
+        else:
+            query = (
+                "SELECT id, session_id, original_query, status, final_answer, "
+                "total_elapsed_ms, created_at, completed_at "
+                "FROM agent_tasks ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            )
+            params = (limit, offset)
+
+        from datetime import datetime
+        rows = []
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, params) as cur:
+                async for row in cur:
+                    rows.append({
+                        "task_id": row["id"],
+                        "session_id": row["session_id"],
+                        "query_preview": (row["original_query"] or "")[:120],
+                        "status": row["status"],
+                        "total_elapsed_ms": row["total_elapsed_ms"],
+                        "created_at": datetime.fromtimestamp(row["created_at"]).isoformat(),
+                    })
+        return rows
+
     async def load(self, task_id: str) -> Optional[TaskGraph]:
         await self._init()
         async with aiosqlite.connect(self._db_path) as db:

@@ -22,6 +22,7 @@ from orchestrator.agents.task_types import (
     TaskStatus,
 )
 from orchestrator.agents.task_store import TaskStore
+from orchestrator.config.settings import get_settings
 from orchestrator.core.types import ChatRequest, ChatResponse, IntentType
 from orchestrator.utils.logging_utils import get_logger
 
@@ -155,7 +156,10 @@ class MultiAgentEngine:
                     metadata={"from_cache": True, "multi_agent": True},
                 )
 
-        if self._planner.is_complex(query):
+        cfg = get_settings()
+        agents_enabled = cfg.agent.enabled and self._planner is not None
+
+        if agents_enabled and self._planner.is_complex(query):
             log.info("Routing to multi-agent pipeline", query_len=len(query))
             task_req = AgentTaskRequest(
                 session_id=request.session_id,
@@ -163,10 +167,18 @@ class MultiAgentEngine:
             )
             result = await self.run_task(task_req)
             answer = result.final_answer or ""
+
+            # Classify intent so the response has the real intent, not always REASONING
+            try:
+                intent = await self._inference_engine._classifier.classify(query)
+                resp_intent = intent.intent_type
+            except Exception:
+                resp_intent = IntentType.REASONING
+
             response = ChatResponse(
                 session_id=request.session_id,
                 content=answer,
-                intent=IntentType.REASONING,
+                intent=resp_intent,
                 tokens_generated=len(answer.split()),
                 total_tokens=len(answer.split()),
                 time_to_first_token_ms=0.0,
@@ -178,13 +190,16 @@ class MultiAgentEngine:
                     "multi_agent": True,
                     "task_id": result.task_id,
                     "sub_tasks": len(result.sub_tasks),
+                    "sub_task_roles": [st.role.value for st in result.sub_tasks],
+                    "sub_task_statuses": {
+                        st.id: st.status.value for st in result.sub_tasks
+                    },
                 },
             )
-            # Store in cache so repeated identical queries are served instantly
-            if self._cache and answer and self._cache.should_cache(query, IntentType.REASONING.value):
+            if self._cache and answer and self._cache.should_cache(query, resp_intent.value):
                 import asyncio as _asyncio
                 _asyncio.create_task(
-                    self._cache.set(query, answer, IntentType.REASONING.value, len(answer.split()))
+                    self._cache.set(query, answer, resp_intent.value, len(answer.split()))
                 )
             return response
 

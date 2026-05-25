@@ -72,10 +72,14 @@ class TestHealthEndpoints:
 # ── Admin endpoints ───────────────────────────────────────────────────────────
 
 class TestAdminEndpoints:
+    # Default API key from settings (APISettings.key default)
+    _ADMIN_HEADERS = {"X-API-Key": "changeme-in-production"}
+
     def test_classify_coding_intent(self, client):
         resp = client.post(
             "/v1/admin/classify",
             json={"text": "Write a Python sorting function"},
+            headers=self._ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -86,6 +90,7 @@ class TestAdminEndpoints:
         resp = client.post(
             "/v1/admin/classify",
             json={"text": "Solve this equation: x^2 + 5x + 6 = 0"},
+            headers=self._ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["intent"] == "math"
@@ -94,6 +99,7 @@ class TestAdminEndpoints:
         resp = client.post(
             "/v1/admin/classify",
             json={"text": "Translate 'good morning' to Spanish"},
+            headers=self._ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["intent"] == "translation"
@@ -102,16 +108,25 @@ class TestAdminEndpoints:
         resp = client.post(
             "/v1/admin/classify",
             json={"text": "Summarize this article for me"},
+            headers=self._ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["intent"] == "summarization"
 
     def test_classify_missing_text_returns_422(self, client):
-        resp = client.post("/v1/admin/classify", json={})
+        resp = client.post("/v1/admin/classify", json={}, headers=self._ADMIN_HEADERS)
         assert resp.status_code == 422
 
-    def test_list_experts(self, client):
+    def test_admin_requires_api_key(self, client):
         resp = client.get("/v1/admin/experts")
+        assert resp.status_code == 403
+
+    def test_admin_rejects_wrong_key(self, client):
+        resp = client.get("/v1/admin/experts", headers={"X-API-Key": "wrong-key"})
+        assert resp.status_code == 403
+
+    def test_list_experts(self, client):
+        resp = client.get("/v1/admin/experts", headers=self._ADMIN_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert "experts" in data
@@ -123,6 +138,7 @@ class TestAdminEndpoints:
         resp = client.post(
             "/v1/admin/benchmark",
             json={"prompts": ["Write a Python function", "Solve 2+2"], "iterations": 2},
+            headers=self._ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         results = resp.json()
@@ -135,6 +151,7 @@ class TestAdminEndpoints:
         resp = client.post(
             "/v1/admin/benchmark",
             json={"prompts": ["test"], "iterations": 1},
+            headers=self._ADMIN_HEADERS,
         )
         assert resp.status_code == 200
 

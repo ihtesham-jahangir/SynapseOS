@@ -37,6 +37,7 @@ from orchestrator.agents.task_planner import TaskPlanner
 from orchestrator.agents.agent_pool import AgentPool
 from orchestrator.agents.multi_agent_engine import MultiAgentEngine
 from orchestrator.agents.task_store import TaskStore
+from orchestrator.utils.audit_log import AuditLog
 
 
 class Container:
@@ -113,13 +114,14 @@ class Container:
         self.l1 = L1ConversationCache(
             max_turns=cfg.memory.l1_max_turns,
             max_tokens=cfg.memory.l1_max_tokens,
+            ttl_seconds=cfg.memory.l1_ttl_seconds,
         )
-        self.l2 = L2SummaryCache(db_path=cfg.storage.sqlite_path)
+        self.l2 = L2SummaryCache(db_path=cfg.storage.memory_db_path)
         self.l3 = L3VectorMemory(
             embedder=self.embedder,
             index=self.memory_index,
         )
-        self.l4 = L4KnowledgeBase(db_path=cfg.storage.sqlite_path)
+        self.l4 = L4KnowledgeBase(db_path=cfg.storage.memory_db_path)
 
         # ── llama.cpp client ───────────────────────────────────────────────
         self.llama_client = LlamaClient(
@@ -152,7 +154,7 @@ class Container:
         self.routing_engine = RoutingEngine()
 
         # ── Experts ────────────────────────────────────────────────────────
-        self.expert_manager = ExpertManager()
+        self.expert_manager = ExpertManager(embedder=self.embedder)
 
         # ── Fusion ─────────────────────────────────────────────────────────
         self.fusion_engine = AdaptiveFusionEngine()
@@ -160,8 +162,12 @@ class Container:
         # ── Compute controller ─────────────────────────────────────────────
         self.compute_controller = AdaptiveComputeController()
 
-        # ── Response cache ─────────────────────────────────────────────────
-        self.response_cache = ResponseCache(maxsize=512, ttl_seconds=3600)
+        # ── Response cache (with semantic similarity layer) ────────────────
+        self.response_cache = ResponseCache(
+            maxsize=512,
+            ttl_seconds=3600,
+            embedder=self.embedder.embed_query,
+        )
 
         # ── Inference batcher (v2.1) — controls llama.cpp slot concurrency ──
         self.batcher = InferenceBatcher(
@@ -206,7 +212,8 @@ class Container:
 
         # ── Multi-agent system (v3.0) ──────────────────────────────────────
         self.bus = SharedMemoryBus()
-        self.task_store = TaskStore(db_path=cfg.storage.sqlite_path)
+        self.task_store = TaskStore(db_path=cfg.storage.tasks_db_path)
+        self.audit_log = AuditLog(db_path=cfg.storage.tasks_db_path)
         self.task_planner = TaskPlanner(llama_client=self.llama_client)
         # Cap agent concurrency to the llama server's actual slot count so we
         # never queue more requests than it can serve simultaneously.
@@ -216,6 +223,8 @@ class Container:
             bus=self.bus,
             max_parallel=effective_parallel,
             task_timeout_s=cfg.agent.task_timeout_s,
+            max_retries=cfg.agent.max_retries,
+            retry_delay_base_s=cfg.agent.retry_delay_base_s,
         )
         self.multi_agent_engine = MultiAgentEngine(
             planner=self.task_planner,
@@ -264,3 +273,7 @@ def get_l4() -> L4KnowledgeBase:
 
 def get_kv_cache() -> KVCacheManager:
     return Container.get().kv_cache
+
+
+def get_audit_log() -> AuditLog:
+    return Container.get().audit_log

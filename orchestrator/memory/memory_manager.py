@@ -21,7 +21,7 @@ from orchestrator.core.types import (
 from orchestrator.config.settings import get_settings
 from orchestrator.utils.logging_utils import get_logger
 from orchestrator.utils.async_utils import gather_with_fallback
-from orchestrator.utils.metrics import MEMORY_HITS
+from orchestrator.utils.metrics import MEMORY_HITS, MEMORY_RETRIEVAL_LATENCY_MS
 
 from .l1_cache import L1ConversationCache
 from .l2_cache import L2SummaryCache
@@ -29,6 +29,7 @@ from .l3_cache import L3VectorMemory
 from .l4_cache import L4KnowledgeBase
 from .compressor import ContextCompressor
 from .compression_queue import CompressionQueue
+from orchestrator.utils.fact_extractor import extract_facts, should_extract
 
 log = get_logger(__name__)
 
@@ -81,6 +82,12 @@ class MemoryManager:
         await self._l1.push_turn(session_id, user_message)
         await self._l1.push_turn(session_id, assistant_message)
 
+        # Auto-extract personal facts from user message → L3 semantic memory
+        if should_extract(user_message.content):
+            facts = extract_facts(user_message.content)
+            for fact_text, importance in facts:
+                asyncio.create_task(self.store_fact(session_id, fact_text, importance))
+
         # Check if compression is needed
         current_tokens = self._l1.session_token_count(session_id)
         l1_capacity = self._l1._max_tokens
@@ -126,6 +133,7 @@ class MemoryManager:
                     turn_end=split,
                 )
                 await self._l2.store(summary_item)
+                await self._l1.pop_turns(session_id, split)
                 log.info(
                     "L1→L2 compression completed",
                     session=session_id,
@@ -165,12 +173,20 @@ class MemoryManager:
         """
         t0 = time.perf_counter()
 
-        # Parallel retrieval from all tiers
+        # Parallel retrieval from all tiers (with per-tier latency tracking)
+        async def _timed(coro, level: str):
+            t = time.perf_counter()
+            result = await coro
+            MEMORY_RETRIEVAL_LATENCY_MS.labels(level=level).observe(
+                (time.perf_counter() - t) * 1000
+            )
+            return result
+
         l1_items, l2_items, l3_items, l4_items = await gather_with_fallback(
-            self._l1.retrieve(query, session_id, limit=self._cfg.l1_max_turns),
-            self._l2.retrieve(query, session_id, limit=3),
-            self._l3.retrieve(query, session_id, limit=self._cfg.l3_max_results),
-            self._l4.retrieve(query, session_id, limit=self._cfg.l4_max_results),
+            _timed(self._l1.retrieve(query, session_id, limit=self._cfg.l1_max_turns), "l1"),
+            _timed(self._l2.retrieve(query, session_id, limit=3), "l2"),
+            _timed(self._l3.retrieve(query, session_id, limit=self._cfg.l3_max_results), "l3"),
+            _timed(self._l4.retrieve(query, session_id, limit=self._cfg.l4_max_results), "l4"),
             fallbacks=[[], [], [], []],
         )
 
@@ -216,6 +232,17 @@ class MemoryManager:
     async def get_conversation(self, session_id: str) -> List[Message]:
         """Return raw L1 conversation turns for context building."""
         return await self._l1.get_turns(session_id)
+
+    def list_sessions(self) -> list:
+        """Return summary info for every session currently in L1."""
+        sessions = []
+        for sid in self._l1.active_sessions():
+            sessions.append({
+                "session_id": sid,
+                "turns": len(self._l1._sessions.get(sid, [])),
+                "tokens": self._l1.session_token_count(sid),
+            })
+        return sessions
 
     async def clear_session(self, session_id: str) -> None:
         await asyncio.gather(

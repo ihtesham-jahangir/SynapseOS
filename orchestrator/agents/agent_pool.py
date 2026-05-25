@@ -19,6 +19,7 @@ from orchestrator.utils.metrics import (
     AGENT_TASKS_TOTAL,
     AGENT_TASK_DURATION_MS,
     AGENT_POOL_ACTIVE,
+    AGENT_RETRY_TOTAL,
 )
 
 log = get_logger(__name__)
@@ -39,11 +40,15 @@ class AgentPool:
         bus,
         max_parallel: int = 4,
         task_timeout_s: float = 120.0,
+        max_retries: int = 1,
+        retry_delay_base_s: float = 2.0,
     ) -> None:
         self._llama = llama_client
         self._bus = bus
         self._max_parallel = max(1, max_parallel)
         self._timeout_s = task_timeout_s
+        self._max_retries = max_retries
+        self._retry_delay_base = retry_delay_base_s
         self._active = 0
 
     def _make_agent(self, role: AgentRole):
@@ -64,20 +69,50 @@ class AgentPool:
         self._active += 1
         AGENT_POOL_ACTIVE.set(self._active)
         try:
-            return await asyncio.wait_for(
-                agent.run(task_id, sub_task, context),
-                timeout=self._timeout_s,
-            )
-        except asyncio.TimeoutError:
-            sub_task.status = TaskStatus.FAILED
-            sub_task.error = f"Sub-task timed out after {self._timeout_s:.0f}s"
-            log.warning(
-                "Agent sub-task timed out",
-                subtask=sub_task.id,
-                role=sub_task.role.value,
-                timeout_s=self._timeout_s,
-            )
-            return sub_task
+            for attempt in range(self._max_retries + 1):
+                try:
+                    return await asyncio.wait_for(
+                        agent.run(task_id, sub_task, context),
+                        timeout=self._timeout_s,
+                    )
+                except (asyncio.TimeoutError, Exception) as exc:
+                    is_timeout = isinstance(exc, asyncio.TimeoutError)
+                    if attempt < self._max_retries:
+                        delay = self._retry_delay_base * (2 ** attempt)
+                        log.warning(
+                            "Agent sub-task failed — retrying",
+                            subtask=sub_task.id,
+                            role=sub_task.role.value,
+                            attempt=attempt + 1,
+                            max_retries=self._max_retries,
+                            delay_s=delay,
+                            error=str(exc) if not is_timeout else f"timeout after {self._timeout_s:.0f}s",
+                        )
+                        await asyncio.sleep(delay)
+                        AGENT_RETRY_TOTAL.labels(role=sub_task.role.value).inc()
+                        # Re-create agent for retry to avoid stale state
+                        agent = self._make_agent(sub_task.role)
+                        continue
+                    # All attempts exhausted
+                    if is_timeout:
+                        sub_task.status = TaskStatus.FAILED
+                        sub_task.error = f"Timed out after {self._timeout_s:.0f}s ({self._max_retries + 1} attempts)"
+                        log.warning(
+                            "Agent sub-task timed out (all retries exhausted)",
+                            subtask=sub_task.id,
+                            role=sub_task.role.value,
+                            attempts=self._max_retries + 1,
+                        )
+                    else:
+                        sub_task.status = TaskStatus.FAILED
+                        sub_task.error = f"{exc} (after {self._max_retries + 1} attempts)"
+                        log.error(
+                            "Agent sub-task failed (all retries exhausted)",
+                            subtask=sub_task.id,
+                            role=sub_task.role.value,
+                            error=str(exc),
+                        )
+                    return sub_task
         finally:
             self._active -= 1
             AGENT_POOL_ACTIVE.set(self._active)

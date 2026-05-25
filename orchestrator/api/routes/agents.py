@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from orchestrator.agents.task_types import AgentTaskRequest, AgentTaskResponse, TaskStatus
@@ -18,6 +20,21 @@ from orchestrator.agents.multi_agent_engine import get_task, get_task_from_store
 from orchestrator.api.dependencies import get_container
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
+
+
+@router.get("/tasks")
+async def list_tasks(
+    session_id: Optional[str] = Query(default=None, description="Filter by session"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """
+    Paginated list of past agent tasks (lightweight summaries, no sub-task payloads).
+    Sorted by most-recent first.
+    """
+    container = get_container()
+    tasks = await container.task_store.list(session_id=session_id, limit=limit, offset=offset)
+    return {"tasks": tasks, "limit": limit, "offset": offset, "total": len(tasks)}
 
 
 @router.post("/tasks", response_model=AgentTaskResponse)

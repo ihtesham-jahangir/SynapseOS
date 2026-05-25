@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import List
 
 from orchestrator.agents.task_types import AgentRole, SubTask, TaskGraph
@@ -17,36 +18,18 @@ from orchestrator.utils.logging_utils import get_logger
 
 log = get_logger(__name__)
 
-# Keywords that indicate a query likely needs decomposition
+# Multi-word or unambiguous phrases that indicate genuine multi-step queries.
+# Single words like "first", "also", "additionally" are intentionally excluded
+# because they appear in simple sentences ("first explain X") and cause false
+# positives that route trivial queries through the expensive multi-agent pipeline.
 _COMPLEXITY_KEYWORDS = frozenset({
-    "and then", "first", "then also", "also", "additionally", "furthermore",
-    "step by step", "steps", "explain and", "write and", "create and",
+    "and then", "step by step", "explain and", "write and", "create and",
     "compare", "versus", "analyze", "breakdown", "walk me through",
+    "followed by", "after that", "in addition to", "as well as",
 })
 
-_PLAN_SYSTEM = """\
-You are a task decomposition expert for an AI system.
-Given a user query, decompose it into 2-5 atomic sub-tasks that can be executed
-by specialized agents with the following roles:
-  - research:    gather / look up information
-  - coder:       write or explain code
-  - reasoner:    logical reasoning, analysis, math
-  - summarizer:  synthesize all prior results into a final answer
-  - general:     anything that does not fit above
-
-Rules:
-1. Each sub-task must be self-contained and clearly described.
-2. List dependency IDs (prior sub-task IDs that must finish first).
-3. If there are 3 or more sub-tasks, the last one should be role "summarizer".
-4. Use short IDs like t1, t2, t3.
-
-Respond ONLY with valid JSON in this exact schema (no extra text):
-{
-  "sub_tasks": [
-    {"id": "t1", "description": "...", "role": "research", "dependencies": []},
-    {"id": "t2", "description": "...", "role": "summarizer", "dependencies": ["t1"]}
-  ]
-}"""
+_PROMPT_FILE = Path(__file__).parent.parent / "prompts" / "task_planner.txt"
+_PLAN_SYSTEM: str = _PROMPT_FILE.read_text(encoding="utf-8").strip()
 
 
 def _is_complex(query: str) -> bool:
@@ -130,5 +113,18 @@ class TaskPlanner:
                 role=role,
                 dependencies=[str(d) for d in item.get("dependencies", [])],
             ))
+
+        # Validate dependency IDs — drop non-existent or self-referential deps
+        valid_ids = {st.id for st in sub_tasks}
+        for st in sub_tasks:
+            # A task must not depend on itself or a non-existent task
+            invalid = [d for d in st.dependencies if d not in valid_ids or d == st.id]
+            if invalid:
+                log.warning(
+                    "Planner returned invalid dependency IDs — dropping",
+                    task=st.id,
+                    invalid=invalid,
+                )
+                st.dependencies = [d for d in st.dependencies if d in valid_ids and d != st.id]
 
         return sub_tasks

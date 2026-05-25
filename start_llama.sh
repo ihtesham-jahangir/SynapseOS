@@ -20,15 +20,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${SCRIPT_DIR}/bin/llama-b9279"
 SERVER="${BIN_DIR}/llama-server"
 PORT=8080
-N_THREADS=8          # i5-8350U has 8 threads — use all of them
-N_CTX=4096           # context window
+N_THREADS=4          # physical cores only — SMT hurts matrix multiply on i5-8350U
+N_CTX=2048           # context window (matches context_token_budget + max_tokens headroom)
 N_BATCH=512
-# Parallel inference slots (v2.1): set LLAMA_N_PARALLEL=2 to allow 2 concurrent requests.
+# Parallel inference slots (v2.1): 2 slots allows concurrent requests without thrashing.
 # Must match LLAMA_N_PARALLEL in .env so InferenceBatcher knows the slot count.
-N_PARALLEL="${LLAMA_N_PARALLEL:-1}"
+N_PARALLEL="${LLAMA_N_PARALLEL:-2}"
 
 # ── GPU auto-detection ────────────────────────────────────────────────────────
-# Priority: LLAMA_GPU_LAYERS env var > nvidia-smi detection > CPU fallback
+# Priority: LLAMA_GPU_LAYERS env var > NVIDIA detection > Vulkan detection > CPU
+# NOTE: Intel iGPU requires Vulkan-enabled llama.cpp binary. Only auto-enable
+#       GPU layers for NVIDIA (nvidia-smi) or if LLAMA_GPU_LAYERS is set explicitly.
 N_GPU_LAYERS=0
 GPU_MODE="CPU only"
 
@@ -43,10 +45,10 @@ elif command -v nvidia-smi &>/dev/null; then
         GPU_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1)
         GPU_MODE="NVIDIA GPU — ${GPU_NAME} (${GPU_VRAM})"
     fi
-elif [ -f /proc/driver/nvidia/version ] || ls /dev/dri/renderD* &>/dev/null 2>&1; then
-    # Fallback: check for any GPU device files
-    N_GPU_LAYERS=99
-    GPU_MODE="GPU device detected (set LLAMA_GPU_LAYERS=0 to force CPU)"
+elif ldd "${SERVER}" 2>/dev/null | grep -q libvulkan && command -v vulkaninfo &>/dev/null; then
+    # Binary was compiled with Vulkan — safe to enable GPU offload for Intel/AMD iGPU
+    N_GPU_LAYERS=20
+    GPU_MODE="Vulkan iGPU (set LLAMA_GPU_LAYERS=0 to force CPU)"
 fi
 
 # ── Model auto-discovery ──────────────────────────────────────────────────────

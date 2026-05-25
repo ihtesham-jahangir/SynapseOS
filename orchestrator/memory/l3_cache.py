@@ -46,6 +46,9 @@ class L3VectorMemory(BaseMemoryStore):
         )
         self._threshold = cfg.memory.l3_similarity_threshold
         self._max_results = cfg.memory.l3_max_results
+        # Track sessions that have been cleared so retrieval can filter them out.
+        # FAISS doesn't support selective deletion; this is the lightweight alternative.
+        self._cleared_sessions: set = set()
 
     async def store(self, item: MemoryItem) -> None:
         try:
@@ -86,6 +89,8 @@ class L3VectorMemory(BaseMemoryStore):
         items: List[MemoryItem] = []
         now = time.time()
         for _id, score, meta in results:
+            if meta.get("session_id") in self._cleared_sessions:
+                continue
             age_h = (now - meta.get("timestamp", now)) / 3600
             recency = max(0.0, 1.0 - age_h / 168)  # decays over 1 week
             items.append(
@@ -104,6 +109,5 @@ class L3VectorMemory(BaseMemoryStore):
         return items
 
     async def clear_session(self, session_id: str) -> None:
-        # FAISS doesn't support selective deletion efficiently;
-        # mark items as deleted in metadata on next rebuild
-        log.warning("L3 per-session clear is deferred to next index rebuild", session=session_id)
+        self._cleared_sessions.add(session_id)
+        log.info("L3 session soft-deleted — future retrievals will exclude this session", session=session_id)

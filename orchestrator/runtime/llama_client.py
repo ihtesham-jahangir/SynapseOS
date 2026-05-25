@@ -57,49 +57,7 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
-# ── Circuit breaker ───────────────────────────────────────────────────────────
-
-class CircuitBreaker:
-    """
-    Three-state circuit breaker: CLOSED → OPEN (after N failures) → HALF_OPEN.
-
-    CLOSED:    normal operation
-    OPEN:      fail fast; no requests sent to backend
-    HALF_OPEN: one trial request allowed; success → CLOSED, failure → OPEN again
-    """
-
-    def __init__(self, failure_threshold: int = 5, recovery_timeout_s: float = 30.0) -> None:
-        self._threshold = failure_threshold
-        self._recovery = recovery_timeout_s
-        self._failures = 0
-        self._opened_at: Optional[float] = None
-
-    @property
-    def state(self) -> str:
-        if self._opened_at is None:
-            return "closed"
-        if time.monotonic() - self._opened_at >= self._recovery:
-            return "half_open"
-        return "open"
-
-    def is_open(self) -> bool:
-        return self.state == "open"
-
-    def record_success(self) -> None:
-        if self._opened_at is not None:
-            log.info("Circuit breaker CLOSED — backend recovered")
-        self._failures = 0
-        self._opened_at = None
-
-    def record_failure(self) -> None:
-        self._failures += 1
-        if self._failures >= self._threshold and self._opened_at is None:
-            self._opened_at = time.monotonic()
-            log.warning(
-                "Circuit breaker OPEN — failing fast",
-                failures=self._failures,
-                recovery_s=self._recovery,
-            )
+from orchestrator.utils.circuit_breaker import CircuitBreaker  # shared implementation
 
 
 class LlamaClient:
@@ -123,7 +81,7 @@ class LlamaClient:
         self._timeout = timeout or llama_cfg.timeout
         self._mock = getattr(cfg, "mock_llm", False)
         self._client: Optional[httpx.AsyncClient] = None
-        self._circuit = CircuitBreaker()
+        self._circuit = CircuitBreaker(name="llama_client")
 
     def _mock_response(self, messages: List[Dict[str, str]]) -> str:
         last_content = next(

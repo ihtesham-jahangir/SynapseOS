@@ -10,9 +10,11 @@ GET /v1/stats      – runtime statistics
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import List
 
+import aiosqlite
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import PlainTextResponse
 
@@ -139,9 +141,19 @@ async def health_check(
     cb_state = container.llama_client._circuit.state
     components.append(
         ComponentHealth(
-            name="circuit_breaker",
+            name="llama_circuit_breaker",
             healthy=cb_state != "open",
-            details={"state": cb_state},
+            details=container.llama_client._circuit.status(),
+        )
+    )
+
+    # Check embedding circuit breaker state
+    emb_cb_state = container.embedder._circuit.state
+    components.append(
+        ComponentHealth(
+            name="embedding_circuit_breaker",
+            healthy=emb_cb_state != "open",
+            details=container.embedder._circuit.status(),
         )
     )
 
@@ -165,15 +177,40 @@ async def liveness() -> dict:
 
 @router.get("/health/ready")
 async def readiness() -> dict:
-    """Kubernetes readiness probe – 200 only when llama.cpp is reachable."""
+    """Kubernetes readiness probe — 200 only when llama.cpp AND SQLite are reachable."""
     container = get_container()
-    if await container.llama_client.health_check():
+    from orchestrator.config.settings import get_settings
+    cfg = get_settings()
+
+    llama_ok, sqlite_ok = await asyncio.gather(
+        container.llama_client.health_check(),
+        _check_sqlite(cfg.storage.sqlite_path),
+        return_exceptions=False,
+    )
+
+    if llama_ok and sqlite_ok:
         return {"status": "ready"}
+
+    reasons = []
+    if not llama_ok:
+        reasons.append("llama_server_unreachable")
+    if not sqlite_ok:
+        reasons.append("sqlite_unavailable")
+
     return Response(
-        content='{"status": "not_ready", "reason": "llama_server_unreachable"}',
+        content=json.dumps({"status": "not_ready", "reason": reasons}),
         status_code=503,
         media_type="application/json",
     )
+
+
+async def _check_sqlite(db_path: str) -> bool:
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            await asyncio.wait_for(db.execute("SELECT 1"), timeout=1.0)
+        return True
+    except Exception:
+        return False
 
 
 @router.get("/metrics")

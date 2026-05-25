@@ -8,7 +8,9 @@ POST   /v1/knowledge          – add to L4 knowledge base
 """
 from __future__ import annotations
 
+import asyncio
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -22,6 +24,16 @@ from orchestrator.utils.logging_utils import get_logger
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
+
+
+class BatchIngestRequest(BaseModel):
+    documents: List[IngestRequest]
+
+
+class BatchIngestResponse(BaseModel):
+    results: List[DocumentIngestionResponse]
+    total_chunks: int
+    total_time_ms: float
 
 
 class KnowledgeAddRequest(BaseModel):
@@ -46,24 +58,109 @@ async def ingest_document(
     Ingest a text document into the RAG vector index.
     The document is chunked, embedded, and indexed automatically.
     """
+    # Ensure every ingested document has a stable, returnable ID
+    doc_id = request.metadata.get("doc_id") or str(uuid.uuid4())
+    metadata = {**request.metadata, "doc_id": doc_id}
+
     t0 = time.perf_counter()
     try:
         chunks = await rag.ingest(
             content=request.content,
             source=request.source,
-            metadata=request.metadata,
+            metadata=metadata,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     return DocumentIngestionResponse(
-        document_id=request.metadata.get("doc_id", "unknown"),
+        document_id=doc_id,
         chunks_created=chunks,
-        tokens_indexed=sum(
-            len(request.content.split()) // max(chunks, 1) for _ in range(chunks)
-        ),  # approximate
+        tokens_indexed=len(request.content.split()),
         time_ms=elapsed_ms,
+    )
+
+
+@router.post("/batch", response_model=BatchIngestResponse)
+async def ingest_batch(
+    request: BatchIngestRequest,
+    rag: RAGPipeline = Depends(get_rag_pipeline),
+) -> BatchIngestResponse:
+    """
+    Ingest multiple documents concurrently in a single request.
+    Each document is chunked and indexed independently; partial failures
+    are reported per-document without aborting the rest of the batch.
+    """
+    if not request.documents:
+        raise HTTPException(status_code=400, detail="documents list must not be empty")
+
+    t_batch = time.perf_counter()
+
+    async def _ingest_one(req: IngestRequest) -> DocumentIngestionResponse:
+        doc_id = req.metadata.get("doc_id") or str(uuid.uuid4())
+        meta = {**req.metadata, "doc_id": doc_id}
+        t0 = time.perf_counter()
+        chunks = await rag.ingest(content=req.content, source=req.source, metadata=meta)
+        return DocumentIngestionResponse(
+            document_id=doc_id,
+            chunks_created=chunks,
+            tokens_indexed=len(req.content.split()),
+            time_ms=(time.perf_counter() - t0) * 1000,
+        )
+
+    results = await asyncio.gather(
+        *[_ingest_one(doc) for doc in request.documents],
+        return_exceptions=True,
+    )
+
+    responses: List[DocumentIngestionResponse] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            responses.append(DocumentIngestionResponse(
+                document_id="error",
+                chunks_created=0,
+                tokens_indexed=0,
+                time_ms=0.0,
+            ))
+            log.error("Batch ingest item failed", index=i, error=str(result))
+        else:
+            responses.append(result)
+
+    return BatchIngestResponse(
+        results=responses,
+        total_chunks=sum(r.chunks_created for r in responses),
+        total_time_ms=(time.perf_counter() - t_batch) * 1000,
+    )
+
+
+@router.put("/{doc_id}", response_model=DocumentIngestionResponse)
+async def update_document(
+    doc_id: str,
+    request: IngestRequest,
+    rag: RAGPipeline = Depends(get_rag_pipeline),
+) -> DocumentIngestionResponse:
+    """
+    Replace a document's content atomically: delete old chunks then re-ingest
+    under the same doc_id.  If the document didn't previously exist, it is
+    created (identical to POST with a pre-set doc_id).
+    """
+    try:
+        await rag.delete_document(doc_id)
+    except (ValueError, Exception):
+        pass  # didn't exist — create fresh
+
+    metadata = {**request.metadata, "doc_id": doc_id}
+    t0 = time.perf_counter()
+    try:
+        chunks = await rag.ingest(content=request.content, source=request.source, metadata=metadata)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Update failed: {exc}") from exc
+
+    return DocumentIngestionResponse(
+        document_id=doc_id,
+        chunks_created=chunks,
+        tokens_indexed=len(request.content.split()),
+        time_ms=(time.perf_counter() - t0) * 1000,
     )
 
 

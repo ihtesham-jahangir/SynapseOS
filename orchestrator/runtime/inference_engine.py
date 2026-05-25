@@ -61,6 +61,7 @@ class GenerationPlan:
     memory_levels: List[MemoryLevel] = field(default_factory=list)
     rag_chunks: int = 0
     session_id: str = ""
+    expert_used: Optional[ExpertType] = None
 from orchestrator.core.exceptions import LlamaServerError, OrchestratorError
 from orchestrator.config.settings import get_settings
 from orchestrator.utils.logging_utils import get_logger, bind_request_context
@@ -189,6 +190,7 @@ class InferenceEngine(BaseInferenceEngine):
             memory_levels=memory_result.levels_queried,
             rag_chunks=len(rag_result.chunks),
             session_id=session_id,
+            expert_used=expert_guidance.expert_type if expert_guidance else None,
         )
 
     # ── Main pipeline ─────────────────────────────────────────────────────────
@@ -251,7 +253,7 @@ class InferenceEngine(BaseInferenceEngine):
             gen_params = plan.params
             memory_result_levels = plan.memory_levels
             rag_chunks = plan.rag_chunks
-            expert_guidance = None  # used only for expert_used field
+            expert_used = plan.expert_used
 
             total_ms = tracker.elapsed_ms()
 
@@ -303,8 +305,18 @@ class InferenceEngine(BaseInferenceEngine):
                 total_time_ms=total_ms,
                 memory_levels_used=memory_result_levels,
                 rag_chunks_used=rag_chunks,
-                expert_used=None,
-                metadata=tracker.report(),
+                expert_used=expert_used,
+                metadata={
+                    **tracker.report(),
+                    "intent": intent.intent_type.value,
+                    "subtype": intent.subtype,
+                    "classification_stage": intent.classification_stage,
+                    "secondary_intents": [
+                        {"intent": s.intent_type.value, "confidence": s.confidence}
+                        for s in intent.secondary_intents
+                    ],
+                    "multi_agent": False,
+                },
             )
 
         except Exception as exc:

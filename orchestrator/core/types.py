@@ -25,6 +25,13 @@ class IntentType(str, Enum):
     CONVERSATION = "conversation"
     VOICE = "voice"
     UNKNOWN = "unknown"
+    # v3.5 new domains
+    WRITING = "writing"           # essays, emails, creative writing
+    DATA_ANALYSIS = "data_analysis"  # SQL, pandas, data pipelines
+    CREATIVE = "creative"         # brainstorming, storytelling, ideation
+    SECURITY = "security"         # security review, vulnerability analysis
+    PLANNING = "planning"         # project planning, task breakdown, scheduling
+    EDUCATION = "education"       # step-by-step tutoring, concept explanation
 
 
 class MemoryLevel(str, Enum):
@@ -41,6 +48,13 @@ class ExpertType(str, Enum):
     MATH = "math"
     REASONING = "reasoning"
     GENERAL = "general"
+    # v3.5 new experts
+    WRITING = "writing"
+    DATA_ANALYSIS = "data_analysis"
+    CREATIVE = "creative"
+    SECURITY = "security"
+    PLANNING = "planning"
+    EDUCATION = "education"
 
 
 class MessageRole(str, Enum):
@@ -106,13 +120,23 @@ class StreamEvent(BaseModel):
 
 # ─── Intent models ────────────────────────────────────────────────────────────
 
+class IntentScore(BaseModel):
+    """A single intent with its confidence — used for multi-intent ranking."""
+    intent_type: IntentType
+    confidence: float
+
+
 class Intent(BaseModel):
     intent_type: IntentType
     confidence: float
-    subtype: Optional[str] = None
+    subtype: Optional[str] = None      # e.g. "python", "french", "sql"
     keywords: List[str] = Field(default_factory=list)
     requires_expert: bool = False
     requires_rag: bool = False
+    # v3.5: secondary intents detected alongside the primary (e.g. coding+security)
+    secondary_intents: List[IntentScore] = Field(default_factory=list)
+    # v3.5: classification stage that produced this result
+    classification_stage: str = "unknown"  # "keyword", "semantic", "fused"
 
 
 # ─── Memory models ────────────────────────────────────────────────────────────

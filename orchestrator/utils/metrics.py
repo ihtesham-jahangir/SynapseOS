@@ -139,6 +139,21 @@ BUS_MESSAGES_TOTAL = Counter(
     ["topic"],
 )
 
+# ── v3.2 Memory tier latency histograms ───────────────────────────────────────
+
+MEMORY_RETRIEVAL_LATENCY_MS = Histogram(
+    "synapseos_memory_retrieval_latency_ms",
+    "Per-tier memory retrieval latency (ms)",
+    ["level"],
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250],
+)
+
+AGENT_RETRY_TOTAL = Counter(
+    "synapseos_agent_retry_total",
+    "Agent sub-task retry attempts",
+    ["role"],
+)
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 

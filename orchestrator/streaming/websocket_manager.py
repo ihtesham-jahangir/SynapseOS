@@ -25,21 +25,32 @@ class WebSocketManager:
 
     One session can have multiple connected WebSocket clients
     (e.g. browser tab + mobile app watching the same session).
+    Rejects new connections with code 1013 when the server is at capacity.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_connections: int = 100) -> None:
         # session_id → set of active WebSocket connections
         self._connections: Dict[str, Set[WebSocket]] = {}
         self._lock = asyncio.Lock()
+        self._max_connections = max_connections
 
-    async def connect(self, websocket: WebSocket, session_id: str) -> None:
-        await websocket.accept()
+    def _total_connections(self) -> int:
+        return sum(len(socks) for socks in self._connections.values())
+
+    async def connect(self, websocket: WebSocket, session_id: str) -> bool:
+        """Accept the connection. Returns False and closes if server is at capacity."""
         async with self._lock:
+            if self._total_connections() >= self._max_connections:
+                await websocket.close(code=1013, reason="Server at capacity")
+                log.warning("WebSocket rejected — max connections reached", max=self._max_connections)
+                return False
+            await websocket.accept()
             if session_id not in self._connections:
                 self._connections[session_id] = set()
                 ACTIVE_SESSIONS.inc()
             self._connections[session_id].add(websocket)
         log.debug("WebSocket connected", session=session_id)
+        return True
 
     async def disconnect(self, websocket: WebSocket, session_id: str) -> None:
         async with self._lock:

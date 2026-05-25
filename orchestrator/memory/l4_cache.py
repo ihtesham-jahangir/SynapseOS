@@ -7,6 +7,7 @@ Can be pre-populated via admin API or bulk import.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from datetime import datetime
@@ -51,48 +52,62 @@ class L4KnowledgeBase(BaseMemoryStore):
     """
     Keyword + priority-ranked knowledge retrieval.
     Uses FTS5 for fast keyword search within SQLite.
+
+    Uses a single persistent aiosqlite connection to avoid per-query thread
+    creation overhead (aiosqlite serialises all ops through an internal thread).
     """
 
     def __init__(self, db_path: Optional[str] = None) -> None:
         self._db_path = db_path or get_settings().storage.sqlite_path
         self._max_results = get_settings().memory.l4_max_results
-        self._initialized = False
+        self._db: Optional[aiosqlite.Connection] = None
+        self._init_lock = asyncio.Lock()
 
-    async def _init(self) -> None:
-        if self._initialized:
-            return
-        async with aiosqlite.connect(self._db_path) as db:
+    async def _get_db(self) -> aiosqlite.Connection:
+        """Return the shared connection, creating and initialising it lazily."""
+        if self._db is not None:
+            return self._db
+        async with self._init_lock:
+            if self._db is not None:
+                return self._db
+            db = await aiosqlite.connect(self._db_path)
             await db.executescript(_SCHEMA)
             for pragma in _WAL_PRAGMAS:
                 await db.execute(pragma)
             await db.commit()
-        self._initialized = True
-        log.debug("L4 SQLite initialised", db=self._db_path, wal=True)
+            db.row_factory = aiosqlite.Row
+            self._db = db
+            log.debug("L4 SQLite persistent connection opened", db=self._db_path)
+        return self._db
+
+    async def close(self) -> None:
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
 
     async def store(self, item: MemoryItem) -> None:
-        await self._init()
+        db = await self._get_db()
         category = item.metadata.get("category", "general")
         keywords = item.metadata.get("keywords", "")
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                """INSERT OR REPLACE INTO knowledge_base
-                   (id, content, category, keywords, priority, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    item.id,
-                    item.content,
-                    category,
-                    keywords,
-                    item.importance_score,
-                    time.time(),
-                ),
-            )
-            # Keep FTS in sync
-            await db.execute(
-                "INSERT OR REPLACE INTO knowledge_fts(id, content, keywords) VALUES (?,?,?)",
-                (item.id, item.content, keywords),
-            )
-            await db.commit()
+        await db.execute(
+            """INSERT OR REPLACE INTO knowledge_base
+               (id, content, category, keywords, priority, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                item.id,
+                item.content,
+                category,
+                keywords,
+                item.importance_score,
+                time.time(),
+            ),
+        )
+        # Keep FTS in sync
+        await db.execute(
+            "INSERT OR REPLACE INTO knowledge_fts(id, content, keywords) VALUES (?,?,?)",
+            (item.id, item.content, keywords),
+        )
+        await db.commit()
 
     async def retrieve(
         self,
@@ -100,8 +115,8 @@ class L4KnowledgeBase(BaseMemoryStore):
         session_id: str,
         limit: Optional[int] = None,
     ) -> List[MemoryItem]:
-        """FTS5 keyword search ranked by priority."""
-        await self._init()
+        """FTS5 keyword search with blended relevance+priority ranking."""
+        db = await self._get_db()
         limit = limit or self._max_results
 
         # Build FTS query from query keywords
@@ -111,40 +126,40 @@ class L4KnowledgeBase(BaseMemoryStore):
         if not fts_query:
             return []
 
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            try:
-                async with db.execute(
-                    """SELECT kb.*, rank
-                       FROM knowledge_fts
-                       JOIN knowledge_base kb ON knowledge_fts.id = kb.id
-                       WHERE knowledge_fts MATCH ?
-                       ORDER BY priority DESC, rank
-                       LIMIT ?""",
-                    (fts_query, limit),
-                ) as cursor:
-                    rows = await cursor.fetchall()
-            except Exception:
-                # FTS query syntax error – fall back to LIKE search
-                rows = []
-                async with db.execute(
-                    """SELECT * FROM knowledge_base
-                       WHERE content LIKE ?
-                       ORDER BY priority DESC LIMIT ?""",
-                    (f"%{query[:50]}%", limit),
-                ) as cursor:
-                    rows = await cursor.fetchall()
+        try:
+            # FTS5 rank is negative (more negative = better match).
+            # Blend: 50% FTS relevance + 50% priority for balanced ranking.
+            async with db.execute(
+                """SELECT kb.*, (-rank * 0.5 + priority * 0.5) AS combined_score
+                   FROM knowledge_fts
+                   JOIN knowledge_base kb ON knowledge_fts.id = kb.id
+                   WHERE knowledge_fts MATCH ?
+                   ORDER BY combined_score DESC
+                   LIMIT ?""",
+                (fts_query, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            # FTS query syntax error – fall back to LIKE search
+            rows = []
+            async with db.execute(
+                """SELECT * FROM knowledge_base
+                   WHERE content LIKE ?
+                   ORDER BY priority DESC LIMIT ?""",
+                (f"%{query[:50]}%", limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
 
-            # Update access stats
-            if rows:
-                ids = [row["id"] for row in rows]
-                placeholders = ",".join("?" * len(ids))
-                await db.execute(
-                    f"UPDATE knowledge_base SET access_count = access_count + 1, "
-                    f"last_accessed = ? WHERE id IN ({placeholders})",
-                    [time.time(), *ids],
-                )
-                await db.commit()
+        # Update access stats
+        if rows:
+            ids = [row["id"] for row in rows]
+            placeholders = ",".join("?" * len(ids))
+            await db.execute(
+                f"UPDATE knowledge_base SET access_count = access_count + 1, "
+                f"last_accessed = ? WHERE id IN ({placeholders})",
+                [time.time(), *ids],
+            )
+            await db.commit()
 
         items: List[MemoryItem] = []
         for row in rows:
@@ -186,10 +201,9 @@ class L4KnowledgeBase(BaseMemoryStore):
         return item.id
 
     async def list_categories(self) -> List[str]:
-        await self._init()
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT DISTINCT category FROM knowledge_base ORDER BY category"
-            ) as cursor:
-                rows = await cursor.fetchall()
+        db = await self._get_db()
+        async with db.execute(
+            "SELECT DISTINCT category FROM knowledge_base ORDER BY category"
+        ) as cursor:
+            rows = await cursor.fetchall()
         return [row[0] for row in rows]

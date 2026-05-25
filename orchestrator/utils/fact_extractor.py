@@ -134,9 +134,6 @@ _PATTERNS: List[FactPattern] = [
 _MIN_WORDS = 1
 _MAX_WORDS = 8
 
-# Deduplicate: don't store the same fact twice in one turn
-_seen_cache: dict = {}
-
 
 def extract_facts(text: str) -> List[Tuple[str, float]]:
     """

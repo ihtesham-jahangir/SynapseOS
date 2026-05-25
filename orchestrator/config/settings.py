@@ -55,10 +55,11 @@ class MemorySettings(BaseSettings):
 
     # L1 – hot conversation buffer
     l1_max_turns: int = Field(default=20, alias="L1_MAX_TURNS")
-    l1_max_tokens: int = Field(default=2048, alias="L1_MAX_TOKENS")
+    l1_max_tokens: int = Field(default=512, alias="L1_MAX_TOKENS")
+    l1_ttl_seconds: int = Field(default=3600, alias="L1_TTL_SECONDS")
 
     # L2 – rolling summary store
-    l2_max_tokens: int = Field(default=4096, alias="L2_MAX_TOKENS")
+    l2_max_tokens: int = Field(default=1024, alias="L2_MAX_TOKENS")
     l2_summary_every_n_turns: int = Field(default=10, alias="L2_SUMMARY_EVERY_N_TURNS")
 
     # L3 – vector memory
@@ -105,7 +106,7 @@ class FusionSettings(BaseSettings):
     fusion_priority_weight: float = 0.20
     fusion_importance_weight: float = 0.10
     fusion_dedup_threshold: float = 0.88
-    context_token_budget: int = 3200
+    context_token_budget: int = 1400
     system_token_reserve: int = 256
     conversation_token_reserve: int = 512
 
@@ -125,7 +126,7 @@ class FusionSettings(BaseSettings):
 class GenerationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DEFAULT_", env_file=".env", extra="ignore")
 
-    max_tokens: int = 512
+    max_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.95
     top_k: int = 40
@@ -145,6 +146,7 @@ class APISettings(BaseSettings):
     auth_enabled: bool = False              # env: API_AUTH_ENABLED
     rate_limit_requests: int = 60
     rate_limit_window: int = 60
+    shutdown_timeout_s: int = 30            # env: API_SHUTDOWN_TIMEOUT_S
 
 
 class MultiAgentSettings(BaseSettings):
@@ -154,19 +156,24 @@ class MultiAgentSettings(BaseSettings):
     max_subtasks: int = 5           # AGENT_MAX_SUBTASKS
     max_parallel: int = 4           # AGENT_MAX_PARALLEL (concurrent agents per wave)
     task_timeout_s: float = 180.0   # AGENT_TASK_TIMEOUT_S (per sub-task timeout)
+    max_retries: int = 1          # AGENT_MAX_RETRIES (per subtask)
+    retry_delay_base_s: float = 2.0  # AGENT_RETRY_DELAY_BASE_S
 
 
 class StorageSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    sqlite_path: str = "data/synapseos.db"
+    sqlite_path: str = "data/synapseos.db"   # legacy: kept for backward compat
+    memory_db_path: str = "data/memory.db"   # L2 summaries + L4 knowledge
+    tasks_db_path: str = "data/tasks.db"     # TaskStore + AuditLog
     data_dir: str = "data"
     models_dir: str = "models"
 
     def ensure_dirs(self) -> None:
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         Path(self.models_dir).mkdir(parents=True, exist_ok=True)
-        Path(self.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+        for path in (self.sqlite_path, self.memory_db_path, self.tasks_db_path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
 class Settings(BaseSettings):
