@@ -48,7 +48,6 @@ models/*.safetensors
 data/
 data/*.faiss
 data/*.meta
-cache/
 *.cache
 .pytest_cache/
 .mypy_cache/
